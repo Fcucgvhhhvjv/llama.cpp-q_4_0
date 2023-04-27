@@ -14,7 +14,7 @@ rm -r ../models/pythia-cache
 # quantize model
 echo "Quantizing model"
 cd ..
-python ./scripts/quantize-gptneox.py ../models/pythia/ggml-oasst-sft-4-pythia-12b-epoch-3.5-f16.bin
+python ./scripts/quantize-gptneox.py ./models/pythia/ggml-oasst-sft-4-pythia-12b-epoch-3.5-f16.bin
 
 # remove non-quantized model
 echo "Remove non-quantized model"
