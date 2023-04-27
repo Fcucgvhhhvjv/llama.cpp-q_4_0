@@ -118,9 +118,9 @@ struct gptneox_layer {
     struct ggml_tensor * post_attention_layernorm_bias;
 
     // attention
-    struct ggml_tensor * c_attn_qkv_proj_w;
+    struct ggml_tensor * c_attn_attn_w;
 
-    struct ggml_tensor * c_attn_qkv_proj_bias;
+    struct ggml_tensor * c_attn_attn_bias;
 
     struct ggml_tensor * c_attn_proj_w;
     struct ggml_tensor * c_attn_proj_bias;
@@ -997,8 +997,8 @@ static void gptneox_model_load_internal(
             layer.input_layernorm_weight = ml->get_tensor(layers_i + ".input_layernorm.weight", {n_embd});
             layer.input_layernorm_bias = ml->get_tensor(layers_i + ".input_layernorm.bias", {n_embd});
 
-            layer.c_attn_qkv_proj_w = ml->get_tensor(layers_i + ".attention.query_key_value.weight", {n_embd, n_embd * 3});
-            layer.c_attn_qkv_proj_bias = ml->get_tensor(layers_i + ".attention.query_key_value.bias", {n_embd * 3});
+            layer.c_attn_attn_w = ml->get_tensor(layers_i + ".attention.query_key_value.weight", {n_embd, n_embd * 3});
+            layer.c_attn_attn_bias = ml->get_tensor(layers_i + ".attention.query_key_value.bias", {n_embd * 3});
             layer.c_attn_proj_w = ml->get_tensor(layers_i + ".attention.dense.weight", {n_embd, n_embd});
             layer.c_attn_proj_bias = ml->get_tensor(layers_i + ".attention.dense.bias", {n_embd});
 
@@ -1128,10 +1128,10 @@ static bool gptneox_eval_internal(
             // cur = attn_w*cur + attn_b
             // [3*n_embd, N]
             {
-                cur = ggml_mul_mat(ctx0, model.layers[il].c_attn_qkv_proj_w, cur);
+                cur = ggml_mul_mat(ctx0, model.layers[il].c_attn_attn_w, cur);
                 cur = ggml_add(ctx0,
                         ggml_repeat(ctx0,
-                                    model.layers[il].c_attn_qkv_proj_bias, cur),
+                                    model.layers[il].c_attn_attn_bias, cur),
                         cur);
             }
              
