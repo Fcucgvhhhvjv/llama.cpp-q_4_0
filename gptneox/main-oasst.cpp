@@ -180,8 +180,10 @@ int main(int argc, char ** argv) {
     std::vector<gptneox_token> last_n_tokens = std::vector<gptneox_token>();
     //std::fill(last_n_tokens.begin(), last_n_tokens.end(), 0);
     
+    set_console_color(con_st, CONSOLE_COLOR_PROMPT);
+    
     if (params.interactive) {
-        fprintf(stderr, "== Running in interactive mode. ==\n"
+        printf("== Running in interactive mode. ==\n"
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__)) || defined (_WIN32)
                " - Press Ctrl+C to interject at any time.\n"
 #endif
