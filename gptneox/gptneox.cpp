@@ -8,7 +8,7 @@
 #include "gptneox_util.h"
 #include "gptneox.h"
 
-#include "ggml.h"
+#include "../ggml.h"
 
 #include <array>
 #include <ctime>
