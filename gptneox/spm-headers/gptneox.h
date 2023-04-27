@@ -1,1 +1,1 @@
-../llama.h
+../gptneox.h
