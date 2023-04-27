@@ -1,5 +1,5 @@
 # Define the default target now so that it is always the first target
-default: main quantize quantize-stats perplexity embedding vdot
+default: main main-gptneox main-oasst quantize quantize-gptneox quantize-stats perplexity embedding vdot
 
 ifndef UNAME_S
 UNAME_S := $(shell uname -s)
@@ -162,20 +162,41 @@ ggml.o: ggml.c ggml.h
 
 llama.o: llama.cpp ggml.h llama.h llama_util.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+	
+gptneox.o: examples/gptneox/gptneox.cpp ggml.h examples/gptneox/gptneox.h examples/gptneox/gptneox_util.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 common.o: examples/common.cpp examples/common.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+	
+common-gptneox.o: examples/gptneox/common-gptneox.cpp examples/gptneox/common-gptneox.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 clean:
-	rm -vf *.o main quantize quantize-stats perplexity embedding benchmark-q4_0-matmult
+	rm -vf *.o main main-gptneox quantize quantize-gptneox quantize-stats perplexity embedding benchmark-q4_0-matmult
 
 main: examples/main/main.cpp ggml.o llama.o common.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 	@echo
 	@echo '====  Run ./main -h for help.  ===='
 	@echo
+	
+main-gptneox: examples/gptneox/main-gptneox.cpp ggml.o gptneox.o common-gptneox.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+	@echo
+	@echo '====  Run ./main -h for help.  ===='
+	@echo
+	
+main-oasst: examples/gptneox/main-oasst.cpp ggml.o gptneox.o common-gptneox.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+	@echo
+	@echo '====  Run ./main -h for help.  ===='
+	@echo
 
 quantize: examples/quantize/quantize.cpp ggml.o llama.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+	
+quantize-gptneox: examples/gptneox/quantize-gptneox.cpp ggml.o gptneox.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 quantize-stats: examples/quantize-stats/quantize-stats.cpp ggml.o llama.o $(OBJS)
