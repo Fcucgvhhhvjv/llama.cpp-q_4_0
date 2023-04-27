@@ -40,6 +40,7 @@ enum e_model {
     MODEL_UNKNOWN,
     MODEL_7B,
     MODEL_12B,
+    MODEL_20B,
 };
 
 static const size_t MB = 1024*1024;
@@ -54,6 +55,7 @@ static const std::map<e_model, size_t> & MEM_REQ_SCRATCH0()
     static std::map<e_model, size_t> _MEM_REQ_SCRATCH0 = {
         { MODEL_7B,    512ull * MB },
         { MODEL_12B,   512ull * MB },
+        { MODEL_20B,   512ull * MB },
     };
     return _MEM_REQ_SCRATCH0;
 }
@@ -64,6 +66,7 @@ static const std::map<e_model, size_t> & MEM_REQ_SCRATCH1()
     static std::map<e_model, size_t> _MEM_REQ_SCRATCH1 = {
         { MODEL_7B,    512ull * MB },
         { MODEL_12B,   512ull * MB },
+        { MODEL_20B,   512ull * MB },
     };
     return _MEM_REQ_SCRATCH1;
 }
@@ -76,6 +79,7 @@ static const std::map<e_model, size_t> & MEM_REQ_KV_SELF()
     static std::map<e_model, size_t> _MEM_REQ_KV_SELF = {
         { MODEL_7B,   1026ull * MB },
         { MODEL_12B,  1608ull * MB },
+        { MODEL_20B,  1608ull * MB },
     };
     return _MEM_REQ_KV_SELF;
 }
@@ -88,6 +92,7 @@ static const std::map<e_model, size_t> & MEM_REQ_EVAL()
     static std::map<e_model, size_t> _MEM_REQ_EVAL = {
         { MODEL_7B,   768ull * MB },
         { MODEL_12B, 1024ull * MB },
+        { MODEL_20B, 1024ull * MB },
     };
     return _MEM_REQ_EVAL;
 }
@@ -875,6 +880,7 @@ static const char *gptneox_model_type_name(e_model type) {
     switch (type) {
         case MODEL_7B: return "7B";
         case MODEL_12B: return "12B";
+        case MODEL_20B: return "20B";
         default: GPTNEOX_ASSERT(false);
     }
 }
@@ -904,6 +910,7 @@ static void gptneox_model_load_internal(
         switch (hparams.n_layer) {
             case 16: model.type = e_model::MODEL_7B; break;
             case 36: model.type = e_model::MODEL_12B; break;
+            case 44: model.type = e_model::MODEL_20B; break;
         }
 
         hparams.n_ctx = n_ctx;
@@ -1157,6 +1164,7 @@ static bool gptneox_eval_internal(
                                             ggml_element_size(cur) * 3 * n_embd/n_head,
                                             ggml_element_size(cur) * 3 * n_embd,
                                             ggml_element_size(cur) * n_embd/n_head * 2);
+            // TODO: Flatten without copying, or see if non-contiguous can be used for any of QKV.
             Qcur = ggml_cpy(ctx0, Qcur,
                         ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, n_embd/n_head, n_head, N));
             Kcur = ggml_cpy(ctx0, Kcur,
@@ -1190,7 +1198,6 @@ static bool gptneox_eval_internal(
                                             ggml_element_size(kv_self.v) * ((il * n_ctx * n_embd) + n_past));
             
                 // important: storing RoPE-ed version of K in the KV cache!
-                // TODO: Is this same for neox rope? Or should rope happen after cache? Seems correct based on orig impl
                 ggml_build_forward_expand(&gf, ggml_cpy(ctx0, Kcur, k));
                 ggml_build_forward_expand(&gf, ggml_cpy(ctx0, Vcur, v));
             //}
@@ -1234,7 +1241,6 @@ static bool gptneox_eval_internal(
                                                 ggml_element_size(kv_self.v) * il * n_ctx * n_embd);
 
             // KQV = transpose(V) * KQ_soft_max
-            // MARK: V input must be pre-transposed because ggml_mul_mat will transpose it again, we ultimately want KQ*V not KQ*V_T
             struct ggml_tensor * KQV = ggml_mul_mat(ctx0, V_trans, KQ_soft_max);
 
             // KQV_merged = KQV.permute(0, 2, 1, 3)
