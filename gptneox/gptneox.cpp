@@ -1576,7 +1576,7 @@ static std::vector<gptneox_vocab::id> gptneox_tokenize(const gptneox_vocab & voc
     }
 
     if (bos) {
-        output.push_back(1);
+        output.push_back(gptneox_token_bos());
     }
 
     tokenizer.tokenize(text, output);

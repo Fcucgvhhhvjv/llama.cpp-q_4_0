@@ -19,4 +19,4 @@ cd ..
         --temp 0.8 \
         --repeat_last_n 64 \
         --repeat_penalty 1.1 \
-        --seed 1
+        --seed 0

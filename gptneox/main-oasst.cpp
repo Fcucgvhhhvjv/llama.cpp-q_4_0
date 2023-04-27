@@ -154,9 +154,8 @@ int main(int argc, char ** argv) {
     
     // prefix & suffix for instruct mode
     const auto prompter_id = 50279; //"<|prompter|>";
+    const auto endoftext_id = 0;
     const auto assistant_id = 50281; //"<|endoftext|><|assistant|>";
-    //const auto inp_pfx = ::gptneox_tokenize(ctx, "<|prompter|>", false); //true);
-    //const auto inp_sfx = ::gptneox_tokenize(ctx, "<|endoftext|><|assistant|>", false);
     
     // Always interactive in Open-Assistant
     params.interactive = true;
@@ -178,8 +177,8 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "\n\n");
     
     // TODO: replace with ring-buffer
-    std::vector<gptneox_token> last_n_tokens(params.n_ctx);
-    std::fill(last_n_tokens.begin(), last_n_tokens.end(), 0);
+    std::vector<gptneox_token> last_n_tokens = std::vector<gptneox_token>();
+    //std::fill(last_n_tokens.begin(), last_n_tokens.end(), 0);
     
     if (params.interactive) {
         fprintf(stderr, "== Running in interactive mode. ==\n"
@@ -263,7 +262,7 @@ int main(int argc, char ** argv) {
         auto embd_inp = std::vector<gptneox_token>();
         embd_inp.push_back(prompter_id);
         embd_inp.insert(embd_inp.end(), prompt_embd.begin(), prompt_embd.end());
-        embd_inp.push_back(0);
+        embd_inp.push_back(endoftext_id);
         embd_inp.push_back(assistant_id);
         
         // Verbose prompt
@@ -293,11 +292,10 @@ int main(int argc, char ** argv) {
             continue;
         }
         // Send batches to eval
-        auto eval_i = 0;
         while (n_past < inp_size) {
             auto remaining = inp_size - n_past;
             int n_eval = params.n_batch < remaining ? params.n_batch : remaining;
-            if (gptneox_eval(ctx, &embd_inp[eval_i], n_eval, n_past, params.n_threads)) {
+            if (gptneox_eval(ctx, &embd_inp[n_past], n_eval, n_past, params.n_threads)) {
                 fprintf(stderr, "%s : failed to eval\n", __func__);
                 return 1;
             }
@@ -311,7 +309,7 @@ int main(int argc, char ** argv) {
             gptneox_token id = gptneox_sample_top_p_top_k(
                 ctx,
                 last_n_tokens.data(),
-                params.repeat_last_n,
+                last_n_tokens.size(),
                 top_k,
                 top_p,
                 temp,
