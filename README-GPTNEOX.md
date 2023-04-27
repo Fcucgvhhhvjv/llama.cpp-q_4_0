@@ -27,3 +27,7 @@ To run models:
 
 - Pythia 12B model:
     run ./scripts/chat-pythia-12B.sh
+    
+Pre-converted/quantized model weights are available via Huggingface:
+- StableLM 7B https://huggingface.co/byroneverson/ggml-stablelm-7b-sft-v7-epoch-3-q4_0
+- Pythia 12B https://huggingface.co/byroneverson/ggml-oasst-sft-4-pythia-12b-epoch-3.5-q4_0
