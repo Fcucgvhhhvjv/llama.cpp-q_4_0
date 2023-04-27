@@ -347,6 +347,8 @@ int main(int argc, char ** argv) {
             // Check for user interrupt
             if (is_interacting) { space = 0; }
         }
+        printf("\n");
+        fflush(stdout);
     }
     
 #if defined (_WIN32)
