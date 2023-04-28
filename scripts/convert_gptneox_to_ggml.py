@@ -73,18 +73,18 @@ for p in model.parameters():
 hparams = model.config.to_dict()
 print("Model loaded: ", model_name)
 
-bin_file_name = f"/ggml-{model_name.split('/')[-1]}-{ftype_str[ftype]}.bin"
-fname_out = dir_out + bin_file_name
-fout = open(fname_out, "wb")
+fn_bin = f"/ggml-{model_name.split('/')[-1]}-{ftype_str[ftype]}.bin"
+fn_out = dir_out + fn_bin
+fout = open(fn_out, "wb")
 
-gptneox_file_magic = 0x67676d66 # 0x67676d6c is unversioned
-gptneox_file_version = 0x00000001 # v1
+ggml_file_magic = 0x67676d66 # 0x67676d6c is unversioned
+ggml_file_version = 0x00000001 # v1
 
 hparams["multiple_of"] = 1
-fout.write(struct.pack("i", gptneox_file_magic)) # magic: ggmf in hex
-fout.write(struct.pack("i", gptneox_file_version))
+fout.write(struct.pack("i", ggml_file_magic)) # magic: ggmf in hex
+fout.write(struct.pack("i", ggml_file_version))
 fout.write(struct.pack("i", hparams["vocab_size"]))
-# fout.write(struct.pack("i", hparams["seq_length"]))
+fout.write(struct.pack("i", hparams["max_position_embeddings"]))
 fout.write(struct.pack("i", hparams["hidden_size"]))
 fout.write(struct.pack("i", hparams["num_attention_heads"]))
 fout.write(struct.pack("i", hparams["num_hidden_layers"]))
@@ -103,6 +103,8 @@ for i in range(hparams["vocab_size"]):
     fout.write(text)
 
 list_vars = model.state_dict()
+
+print(hparams)
 
 for name in list_vars.keys():
     if name.startswith('gpt_neox.layers.'):
@@ -146,5 +148,5 @@ for name in list_vars.keys():
 
 fout.close()
 
-print("Done. Output file: " + fname_out)
+print("Done. Output file: " + fn_out)
 print("")

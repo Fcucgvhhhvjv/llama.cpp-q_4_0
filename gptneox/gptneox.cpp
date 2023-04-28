@@ -29,15 +29,17 @@
 #include <mutex>
 #include <sstream>
 
+// TODO: Add back in n_ctx (max_position_embeddings) to ggml model, it is currently hard-coded to 2048 max for llama
+
 #define GPTNEOX_USE_SCRATCH
 #define GPTNEOX_MAX_SCRATCH_BUFFERS 16
-
 
 // available open-assistant based gptneox models
 // OpenAssistant/stablelm-7b-sft-v7-epoch-3
 // OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5
 enum e_model {
     MODEL_UNKNOWN,
+    MODEL_3B, // StabilityAI Base Alpha 3B
     MODEL_7B,
     MODEL_12B,
     MODEL_20B,
@@ -53,6 +55,7 @@ static const size_t MB = 1024*1024;
 static const std::map<e_model, size_t> & MEM_REQ_SCRATCH0()
 {
     static std::map<e_model, size_t> _MEM_REQ_SCRATCH0 = {
+        { MODEL_3B,    512ull * MB },
         { MODEL_7B,    512ull * MB },
         { MODEL_12B,   512ull * MB },
         { MODEL_20B,   512ull * MB },
@@ -64,6 +67,7 @@ static const std::map<e_model, size_t> & MEM_REQ_SCRATCH0()
 static const std::map<e_model, size_t> & MEM_REQ_SCRATCH1()
 {
     static std::map<e_model, size_t> _MEM_REQ_SCRATCH1 = {
+        { MODEL_3B,    512ull * MB },
         { MODEL_7B,    512ull * MB },
         { MODEL_12B,   512ull * MB },
         { MODEL_20B,   512ull * MB },
@@ -77,6 +81,7 @@ static const std::map<e_model, size_t> & MEM_REQ_SCRATCH1()
 static const std::map<e_model, size_t> & MEM_REQ_KV_SELF()
 {
     static std::map<e_model, size_t> _MEM_REQ_KV_SELF = {
+        { MODEL_3B,   1026ull * MB },
         { MODEL_7B,   1026ull * MB },
         { MODEL_12B,  1608ull * MB },
         { MODEL_20B,  1608ull * MB },
@@ -90,6 +95,7 @@ static const std::map<e_model, size_t> & MEM_REQ_KV_SELF()
 static const std::map<e_model, size_t> & MEM_REQ_EVAL()
 {
     static std::map<e_model, size_t> _MEM_REQ_EVAL = {
+        { MODEL_3B,   768ull * MB },
         { MODEL_7B,   768ull * MB },
         { MODEL_12B, 1024ull * MB },
         { MODEL_20B, 1024ull * MB },
@@ -100,7 +106,7 @@ static const std::map<e_model, size_t> & MEM_REQ_EVAL()
 // default hparams (GPT-NeoX oasst 12B)
 struct gptneox_hparams {
     uint32_t n_vocab = 50288;
-    uint32_t n_ctx   = 2048;   // this is provided as user input?
+    uint32_t n_ctx   = 4096;   // this is provided as user input?
     uint32_t n_embd  = 5120;
     uint32_t n_head  = 40;
     uint32_t n_layer = 36;
@@ -453,6 +459,7 @@ struct gptneox_file_loader {
     void read_hparams() {
         hparams.n_vocab = file.read_u32();
         hparams.n_embd = file.read_u32();
+        hparams.n_ctx = file.read_u32();
         hparams.n_head = file.read_u32();
         hparams.n_layer = file.read_u32();
         hparams.n_rot = file.read_u32();
@@ -878,6 +885,7 @@ static const char *gptneox_ftype_name(enum gptneox_ftype ftype) {
 
 static const char *gptneox_model_type_name(e_model type) {
     switch (type) {
+        case MODEL_3B: return "3B";
         case MODEL_7B: return "7B";
         case MODEL_12B: return "12B";
         case MODEL_20B: return "20B";
@@ -908,6 +916,7 @@ static void gptneox_model_load_internal(
     
     {
         switch (hparams.n_layer) {
+            case 32: model.type = e_model::MODEL_3B; break;
             case 16: model.type = e_model::MODEL_7B; break;
             case 36: model.type = e_model::MODEL_12B; break;
             case 44: model.type = e_model::MODEL_20B; break;
