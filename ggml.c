@@ -9288,12 +9288,7 @@ static void ggml_compute_forward_soft_max_f32(
 
         uint16_t scvt;
         for (int i = 0; i < nc; i++) {
-<<<<<<< HEAD
             //printf("p[%3d] = %8.4f\n", i, p[i]);
-=======
-            // TODO: Claimed bug in ggml 
-            printf("p[%3d] = %8.4f\n", i, p[i]);
->>>>>>> 5a73450 (commit for pull rebase)
             if (p[i] == -INFINITY) {
                 p[i] = 0.0f;
             } else {
