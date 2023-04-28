@@ -153,9 +153,9 @@ int main(int argc, char ** argv) {
     }
     
     // prefix & suffix for instruct mode
-    const auto prompter_id = 50279; //"<|prompter|>";
-    const auto endoftext_id = 0;
-    const auto assistant_id = 50281; //"<|endoftext|><|assistant|>";
+    const auto prompter_id = gptneox_str_to_token(ctx, "<|prompter|>");
+    const auto endoftext_id = gptneox_str_to_token(ctx, "<|endoftext|>");
+    const auto assistant_id = gptneox_str_to_token(ctx, "<|assistant|>");
     
     // Always interactive in Open-Assistant
     params.interactive = true;

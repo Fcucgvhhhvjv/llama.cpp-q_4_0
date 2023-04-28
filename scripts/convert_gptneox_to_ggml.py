@@ -88,11 +88,9 @@ fout.write(struct.pack("i", hparams["max_position_embeddings"]))
 fout.write(struct.pack("i", hparams["hidden_size"]))
 fout.write(struct.pack("i", hparams["num_attention_heads"]))
 fout.write(struct.pack("i", hparams["num_hidden_layers"]))
-# TODO: Check if this is correct.
 fout.write(struct.pack("i", int((hparams["hidden_size"] / hparams["num_attention_heads"]
                              ) * hparams["rotary_pct"]))) # rotary_dim
 fout.write(struct.pack("i", int(hparams["use_parallel_residual"])))
-# f16 or f32
 fout.write(struct.pack("i", ftype))
 
 # Is this correct??

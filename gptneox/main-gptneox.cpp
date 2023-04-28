@@ -173,8 +173,11 @@ int main(int argc, char ** argv) {
     }
 
     // prefix & suffix for instruct mode
-    const auto inp_pfx = ::gptneox_tokenize(ctx, "<|prompter|>", false); //true);
-    const auto inp_sfx = ::gptneox_tokenize(ctx, "<|endoftext|><|assistant|>", false);
+    auto inp_pfx = std::vector<gptneox_token>();
+    inp_pfx.push_back(::gptneox_str_to_token(ctx, "<|prompter|>"));
+    auto inp_sfx = std::vector<gptneox_token>();
+    inp_sfx.push_back(::gptneox_str_to_token(ctx, "<|endoftext|>"));
+    inp_sfx.push_back(::gptneox_str_to_token(ctx, "<|assistant|>"));
 
     // in instruct mode, we inject a prefix and a suffix to each input by the user
     if (params.instruct) {

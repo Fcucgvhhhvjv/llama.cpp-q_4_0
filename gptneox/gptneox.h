@@ -103,6 +103,11 @@ extern "C" {
       enum gptneox_ftype   ftype,
             int          nthread);
 
+    GPTNEOX_API int gptneox_model_copy(
+            const char * fname_inp,
+            const char * fname_out,
+            enum gptneox_ftype   ftype);
+
     // Apply a LoRA adapter to a loaded model
     // path_base_model is the path to a higher quality model to use as a base for
     // the layers modified by the adapter. Can be NULL to use the current loaded model.
@@ -173,6 +178,9 @@ extern "C" {
 
     // Token Id -> String. Uses the vocabulary in the provided context
     GPTNEOX_API const char * gptneox_token_to_str(struct gptneox_context * ctx, gptneox_token token);
+
+    // String -> Token Id. Uses the vocabulary in the provided context
+    GPTNEOX_API gptneox_token gptneox_str_to_token(struct gptneox_context * ctx, const char * str);
 
     // Special tokens
     GPTNEOX_API gptneox_token gptneox_token_bos();

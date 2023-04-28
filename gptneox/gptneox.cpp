@@ -39,7 +39,7 @@
 // OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5
 enum e_model {
     MODEL_UNKNOWN,
-    MODEL_3B, // StabilityAI Base Alpha 3B
+    //MODEL_3B, // StabilityAI Base Alpha 3B
     MODEL_7B,
     MODEL_12B,
     MODEL_20B,
@@ -55,7 +55,7 @@ static const size_t MB = 1024*1024;
 static const std::map<e_model, size_t> & MEM_REQ_SCRATCH0()
 {
     static std::map<e_model, size_t> _MEM_REQ_SCRATCH0 = {
-        { MODEL_3B,    512ull * MB },
+        //{ MODEL_3B,    512ull * MB },
         { MODEL_7B,    512ull * MB },
         { MODEL_12B,   512ull * MB },
         { MODEL_20B,   512ull * MB },
@@ -67,7 +67,7 @@ static const std::map<e_model, size_t> & MEM_REQ_SCRATCH0()
 static const std::map<e_model, size_t> & MEM_REQ_SCRATCH1()
 {
     static std::map<e_model, size_t> _MEM_REQ_SCRATCH1 = {
-        { MODEL_3B,    512ull * MB },
+        //{ MODEL_3B,    512ull * MB },
         { MODEL_7B,    512ull * MB },
         { MODEL_12B,   512ull * MB },
         { MODEL_20B,   512ull * MB },
@@ -81,7 +81,7 @@ static const std::map<e_model, size_t> & MEM_REQ_SCRATCH1()
 static const std::map<e_model, size_t> & MEM_REQ_KV_SELF()
 {
     static std::map<e_model, size_t> _MEM_REQ_KV_SELF = {
-        { MODEL_3B,   1026ull * MB },
+        //{ MODEL_3B,   1026ull * MB },
         { MODEL_7B,   1026ull * MB },
         { MODEL_12B,  1608ull * MB },
         { MODEL_20B,  1608ull * MB },
@@ -95,7 +95,7 @@ static const std::map<e_model, size_t> & MEM_REQ_KV_SELF()
 static const std::map<e_model, size_t> & MEM_REQ_EVAL()
 {
     static std::map<e_model, size_t> _MEM_REQ_EVAL = {
-        { MODEL_3B,   768ull * MB },
+        //{ MODEL_3B,   768ull * MB },
         { MODEL_7B,   768ull * MB },
         { MODEL_12B, 1024ull * MB },
         { MODEL_20B, 1024ull * MB },
@@ -121,26 +121,26 @@ struct gptneox_hparams {
 
 struct gptneox_layer {
     // input_layernorm
-    struct ggml_tensor * input_layernorm_weight;
-    struct ggml_tensor * input_layernorm_bias;
+    struct ggml_tensor * ln_attn_g;
+    struct ggml_tensor * ln_attn_b;
 
     // post_attention_layernorm
-    struct ggml_tensor * post_attention_layernorm_weight;
-    struct ggml_tensor * post_attention_layernorm_bias;
+    struct ggml_tensor * ln_ff_g;
+    struct ggml_tensor * ln_ff_b;
 
     // attention
     struct ggml_tensor * c_attn_attn_w;
 
-    struct ggml_tensor * c_attn_attn_bias;
+    struct ggml_tensor * c_attn_attn_b;
 
     struct ggml_tensor * c_attn_proj_w;
-    struct ggml_tensor * c_attn_proj_bias;
+    struct ggml_tensor * c_attn_proj_b;
 
     // ff
     struct ggml_tensor * c_mlp_fc_w;
     struct ggml_tensor * c_mlp_fc_b;
 
-    struct ggml_tensor * c_mlp_proj_w_trans;
+    struct ggml_tensor * c_mlp_proj_w;
     struct ggml_tensor * c_mlp_proj_b;
 };
 
@@ -555,6 +555,7 @@ struct gptneox_file_saver {
     void write_hparams(enum gptneox_ftype new_ftype) {
         const gptneox_hparams & hparams = any_file_loader->hparams;
         file.write_u32(hparams.n_vocab);
+        file.write_u32(hparams.n_ctx);
         file.write_u32(hparams.n_embd);
         file.write_u32(hparams.n_head);
         file.write_u32(hparams.n_layer);
@@ -885,7 +886,7 @@ static const char *gptneox_ftype_name(enum gptneox_ftype ftype) {
 
 static const char *gptneox_model_type_name(e_model type) {
     switch (type) {
-        case MODEL_3B: return "3B";
+        //case MODEL_3B: return "3B";
         case MODEL_7B: return "7B";
         case MODEL_12B: return "12B";
         case MODEL_20B: return "20B";
@@ -916,7 +917,7 @@ static void gptneox_model_load_internal(
     
     {
         switch (hparams.n_layer) {
-            case 32: model.type = e_model::MODEL_3B; break;
+            //case 16: model.type = e_model::MODEL_3B; break;
             case 16: model.type = e_model::MODEL_7B; break;
             case 36: model.type = e_model::MODEL_12B; break;
             case 44: model.type = e_model::MODEL_20B; break;
@@ -1010,21 +1011,21 @@ static void gptneox_model_load_internal(
 
             std::string layers_i = "gpt_neox.layers." + std::to_string(i);
 
-            layer.input_layernorm_weight = ml->get_tensor(layers_i + ".input_layernorm.weight", {n_embd});
-            layer.input_layernorm_bias = ml->get_tensor(layers_i + ".input_layernorm.bias", {n_embd});
+            layer.ln_attn_g = ml->get_tensor(layers_i + ".input_layernorm.weight", {n_embd});
+            layer.ln_attn_b = ml->get_tensor(layers_i + ".input_layernorm.bias", {n_embd});
 
             layer.c_attn_attn_w = ml->get_tensor(layers_i + ".attention.query_key_value.weight", {n_embd, n_embd * 3});
-            layer.c_attn_attn_bias = ml->get_tensor(layers_i + ".attention.query_key_value.bias", {n_embd * 3});
+            layer.c_attn_attn_b = ml->get_tensor(layers_i + ".attention.query_key_value.bias", {n_embd * 3});
             layer.c_attn_proj_w = ml->get_tensor(layers_i + ".attention.dense.weight", {n_embd, n_embd});
-            layer.c_attn_proj_bias = ml->get_tensor(layers_i + ".attention.dense.bias", {n_embd});
+            layer.c_attn_proj_b = ml->get_tensor(layers_i + ".attention.dense.bias", {n_embd});
 
-            layer.post_attention_layernorm_weight = ml->get_tensor(layers_i + ".post_attention_layernorm.weight", {n_embd});
-            layer.post_attention_layernorm_bias = ml->get_tensor(layers_i + ".post_attention_layernorm.bias", {n_embd});
+            layer.ln_ff_g = ml->get_tensor(layers_i + ".post_attention_layernorm.weight", {n_embd});
+            layer.ln_ff_b = ml->get_tensor(layers_i + ".post_attention_layernorm.bias", {n_embd});
 
-            layer.c_mlp_fc_w =         ml->get_tensor(layers_i + ".mlp.dense_h_to_4h.weight", {n_embd,   n_embd * 4});
-            layer.c_mlp_fc_b =         ml->get_tensor(layers_i + ".mlp.dense_h_to_4h.bias",   {n_embd * 4});
-            layer.c_mlp_proj_w_trans = ml->get_tensor(layers_i + ".mlp.dense_4h_to_h.weight", {n_embd * 4,   n_embd});
-            layer.c_mlp_proj_b =       ml->get_tensor(layers_i + ".mlp.dense_4h_to_h.bias",   {n_embd});
+            layer.c_mlp_fc_w =   ml->get_tensor(layers_i + ".mlp.dense_h_to_4h.weight", {n_embd,   n_embd * 4});
+            layer.c_mlp_fc_b =   ml->get_tensor(layers_i + ".mlp.dense_h_to_4h.bias",   {n_embd * 4});
+            layer.c_mlp_proj_w = ml->get_tensor(layers_i + ".mlp.dense_4h_to_h.weight", {n_embd * 4,   n_embd});
+            layer.c_mlp_proj_b = ml->get_tensor(layers_i + ".mlp.dense_4h_to_h.bias",   {n_embd});
         }
     }
 
@@ -1125,12 +1126,12 @@ static bool gptneox_eval_internal(
         {
             cur = ggml_norm(ctx0, inpL);
 
-            // cur = input_layernorm_weight*cur + input_layernorm_bias
+            // cur = ln_attn_g*cur + ln_attn_b
             cur = ggml_add(ctx0,
                     ggml_mul(ctx0,
-                        ggml_repeat(ctx0, model.layers[il].input_layernorm_weight, cur),
+                        ggml_repeat(ctx0, model.layers[il].ln_attn_g, cur),
                         cur),
-                    ggml_repeat(ctx0, model.layers[il].input_layernorm_bias, cur));
+                    ggml_repeat(ctx0, model.layers[il].ln_attn_b, cur));
         }
 
         // self-attention
@@ -1147,7 +1148,7 @@ static bool gptneox_eval_internal(
                 cur = ggml_mul_mat(ctx0, model.layers[il].c_attn_attn_w, cur);
                 cur = ggml_add(ctx0,
                         ggml_repeat(ctx0,
-                                    model.layers[il].c_attn_attn_bias, cur),
+                                    model.layers[il].c_attn_attn_b, cur),
                         cur);
             }
              
@@ -1256,15 +1257,14 @@ static bool gptneox_eval_internal(
             struct ggml_tensor * KQV_merged = ggml_permute(ctx0, KQV, 0, 2, 1, 3);
 
             // cur = KQV_merged.contiguous().view(n_embd, N)
-            cur = ggml_cpy(ctx0,
-                    KQV_merged,
-                    ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd, N));
+            cur = ggml_cpy(ctx0, KQV_merged,
+                        ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd, N));
 
             // projection (first weight)
             cur = ggml_mul_mat(ctx0, model.layers[il].c_attn_proj_w, cur);
 
             // projection (then bias)
-            cur = ggml_add(ctx0, ggml_repeat(ctx0, model.layers[il].c_attn_proj_bias, cur), cur);
+            cur = ggml_add(ctx0, ggml_repeat(ctx0, model.layers[il].c_attn_proj_b, cur), cur);
         }
 
         lctx.use_buf(ctx0, 1);
@@ -1279,12 +1279,12 @@ static bool gptneox_eval_internal(
             {
                 cur = ggml_norm(ctx0, inpL);
 
-                // cur = input_layernorm_weight*inpFF + input_layernorm_bias
+                // cur = ln_attn_g*inpFF + ln_attn_b
                 cur = ggml_add(ctx0,
                     ggml_mul(ctx0,
-                        ggml_repeat(ctx0, model.layers[il].post_attention_layernorm_weight, cur),
+                        ggml_repeat(ctx0, model.layers[il].ln_ff_g, cur),
                         cur),
-                    ggml_repeat(ctx0, model.layers[il].post_attention_layernorm_bias, cur));
+                    ggml_repeat(ctx0, model.layers[il].ln_ff_b, cur));
             }
 
 
@@ -1293,16 +1293,20 @@ static bool gptneox_eval_internal(
                 // note here we pass inpFF instead of cur
                 cur = ggml_mul_mat(ctx0, model.layers[il].c_mlp_fc_w, cur);
 
-                cur = ggml_add(ctx0, ggml_repeat(ctx0, model.layers[il].c_mlp_fc_b, cur), cur);
+                cur = ggml_add(ctx0,
+                            ggml_repeat(ctx0, model.layers[il].c_mlp_fc_b, cur),
+                            cur);
 
                 // GELU activation
                 cur = ggml_gelu(ctx0, cur);
 
                 // projection
                 // cur = proj_w*inpFF + proj_b
-                cur = ggml_mul_mat(ctx0, model.layers[il].c_mlp_proj_w_trans, cur);
+                cur = ggml_mul_mat(ctx0, model.layers[il].c_mlp_proj_w, cur);
 
-                cur = ggml_add(ctx0, ggml_repeat(ctx0, model.layers[il].c_mlp_proj_b, cur), cur);
+                cur = ggml_add(ctx0,
+                            ggml_repeat(ctx0, model.layers[il].c_mlp_proj_b, cur),
+                            cur);
             }
             //# pseudocode:
             //# x = x + attn(ln1(x)) + mlp(ln2(x))
@@ -1320,12 +1324,12 @@ static bool gptneox_eval_internal(
             {
                 cur = ggml_norm(ctx0, inpFF);
 
-                // inpFF = input_layernorm_weight*inpFF + input_layernorm_bias
+                // inpFF = ln_attn_g*inpFF + ln_attn_b
                 cur = ggml_add(ctx0,
                     ggml_mul(ctx0,
-                        ggml_repeat(ctx0, model.layers[il].post_attention_layernorm_weight, cur),
+                        ggml_repeat(ctx0, model.layers[il].ln_ff_g, cur),
                         cur),
-                    ggml_repeat(ctx0, model.layers[il].post_attention_layernorm_bias, cur));
+                    ggml_repeat(ctx0, model.layers[il].ln_ff_b, cur));
             }
 
             // feed-forward network
@@ -1337,7 +1341,7 @@ static bool gptneox_eval_internal(
 
                 cur = ggml_gelu(ctx0, cur);
 
-                cur = ggml_mul_mat(ctx0, model.layers[il].c_mlp_proj_w_trans, cur);
+                cur = ggml_mul_mat(ctx0, model.layers[il].c_mlp_proj_w, cur);
 
                 cur = ggml_add(ctx0, ggml_repeat(ctx0, model.layers[il].c_mlp_proj_b, cur), cur);
             }
@@ -1710,6 +1714,43 @@ static gptneox_vocab::id gptneox_sample_top_p_top_k(
 //
 // quantization
 //
+
+// temp - load then save model, allows for load and save to be different
+static void gptneox_model_copy_internal(const std::string & fname_inp, const std::string & fname_out, enum gptneox_ftype ftype) {
+    std::unique_ptr<gptneox_model_loader> model_loader(new gptneox_model_loader(fname_inp.c_str(),
+                                                            /*use_mmap*/ false,
+                                                            /*vocab_only*/ false));
+    gptneox_file_saver file_saver(fname_out.c_str(), model_loader->file_loaders.at(0).get(), ftype);
+
+    size_t idx = 0;
+    for (gptneox_load_tensor & tensor : model_loader->tensors_map.tensors) {
+        gptneox_buffer read_data;
+        read_data.resize(tensor.size);
+        tensor.data = read_data.addr;
+        model_loader->load_data_for(tensor);
+
+        printf("[%4zu/%4zu] %36s - %16s, type = %6s, ",
+               ++idx, model_loader->tensors_map.tensors.size(),
+               tensor.name.c_str(), gptneox_format_tensor_shape(tensor.ne).c_str(),
+               ggml_type_name(tensor.type));
+
+        file_saver.write_tensor(tensor, tensor.type, tensor.data, tensor.size);
+    }
+}
+
+int gptneox_model_copy(
+        const char * fname_inp,
+        const char * fname_out,
+  enum gptneox_ftype   ftype) {
+    try {
+        gptneox_model_copy_internal(fname_inp, fname_out, ftype);
+        return 0;
+    } catch (const std::string & err) {
+        fprintf(stderr, "%s: failed to copy: %s\n", __func__, err.c_str());
+        return 1;
+    }
+}
+
 
 static void gptneox_model_quantize_internal(const std::string & fname_inp, const std::string & fname_out, enum gptneox_ftype ftype, int nthread) {
     ggml_type quantized_type;
@@ -2466,6 +2507,10 @@ const char * gptneox_token_to_str(struct gptneox_context * ctx, gptneox_token to
     }
 
     return ctx->vocab.id_to_token[token].tok.c_str();
+}
+
+gptneox_token gptneox_str_to_token(struct gptneox_context * ctx, const char * str) {
+    return ctx->vocab.token_to_id[str];
 }
 
 gptneox_token gptneox_token_bos() {
