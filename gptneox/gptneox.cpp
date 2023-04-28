@@ -458,8 +458,8 @@ struct gptneox_file_loader {
     }
     void read_hparams() {
         hparams.n_vocab = file.read_u32();
-        hparams.n_embd = file.read_u32();
         hparams.n_ctx = file.read_u32();
+        hparams.n_embd = file.read_u32();
         hparams.n_head = file.read_u32();
         hparams.n_layer = file.read_u32();
         hparams.n_rot = file.read_u32();
