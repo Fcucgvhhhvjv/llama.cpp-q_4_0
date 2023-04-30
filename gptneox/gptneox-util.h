@@ -405,4 +405,29 @@ struct gptneox_buffer {
         delete[] addr;
     }
 };
+
+#ifdef GGML_USE_CUBLAS
+#include "ggml-cuda.h"
+struct gptneox_ctx_buffer {
+    uint8_t * addr = NULL;
+    size_t size = 0;
+
+    void resize(size_t size) {
+        if (addr) {
+            ggml_cuda_host_free(addr);
+        }
+        addr = (uint8_t *) ggml_cuda_host_malloc(size);
+        this->size = size;
+    }
+
+    ~gptneox_ctx_buffer() {
+        if (addr) {
+            ggml_cuda_host_free(addr);
+        }
+    }
+};
+#else
+typedef gptneox_buffer gptneox_ctx_buffer;
+#endif
+
 #endif

@@ -39,11 +39,15 @@ extern "C" {
 
     typedef struct gptneox_token_data {
         gptneox_token id;  // token id
-
+        float logit; // log-odds of the token
         float p;     // probability of the token
-        float plog;  // log probability of the token
-
     } gptneox_token_data;
+
+    typedef struct gptneox_token_data_array {
+        gptneox_token_data * data;
+        size_t size;
+        bool sorted;
+    } gptneox_token_data_array;
 
     typedef void (*gptneox_progress_callback)(float progress, void *ctx);
 
@@ -73,7 +77,7 @@ extern "C" {
         GPTNEOX_FTYPE_MOSTLY_Q4_1 = 3,  // except 1d tensors
         GPTNEOX_FTYPE_MOSTLY_Q4_1_SOME_F16 = 4, // tok_embeddings.weight and output.weight are F16
         GPTNEOX_FTYPE_MOSTLY_Q4_2 = 5,  // except 1d tensors
-        GPTNEOX_FTYPE_MOSTLY_Q4_3 = 6,  // except 1d tensors
+        // GPTNEOX_FTYPE_MOSTLY_Q4_3 (6) support has been removed
         GPTNEOX_FTYPE_MOSTLY_Q8_0 = 7,  // except 1d tensors
         GPTNEOX_FTYPE_MOSTLY_Q5_0 = 8,  // except 1d tensors
         GPTNEOX_FTYPE_MOSTLY_Q5_1 = 9,  // except 1d tensors
@@ -138,6 +142,10 @@ extern "C" {
     // Returns the number of bytes read
     GPTNEOX_API size_t gptneox_set_state_data(struct gptneox_context * ctx, const uint8_t * src);
 
+    // Save/load session file
+    GPTNEOX_API size_t gptneox_load_session_file(struct gptneox_context * ctx, const char * path_session, gptneox_token * tokens_out, size_t n_token_capacity, size_t * n_token_count_out);
+    GPTNEOX_API size_t gptneox_save_session_file(struct gptneox_context * ctx, const char * path_session, const gptneox_token * tokens, size_t n_token_count);
+
     // Run the llama inference to obtain the logits and probabilities for the next token.
     // tokens + n_tokens is the provided batch of new tokens to process
     // n_past is the number of tokens to use from previous eval calls
@@ -185,6 +193,7 @@ extern "C" {
     // Special tokens
     GPTNEOX_API gptneox_token gptneox_token_bos();
     GPTNEOX_API gptneox_token gptneox_token_eos();
+    // GPTNEOX_API gptneox_token gptneox_token_nl();
 
     // TODO: improve the last_n_tokens interface ?
     GPTNEOX_API gptneox_token gptneox_sample_top_p_top_k(
@@ -195,6 +204,51 @@ extern "C" {
                       float   top_p,
                       float   temp,
                       float   repeat_penalty);
+
+    // Sampling functions
+
+    /// @details Repetition penalty described in CTRL academic paper https://arxiv.org/abs/1909.05858, with negative logit fix.
+    GPTNEOX_API void gptneox_sample_repetition_penalty(struct gptneox_context * ctx, gptneox_token_data_array * candidates, gptneox_token * last_tokens, size_t last_tokens_size, float penalty);
+
+    /// @details Frequency and presence penalties described in OpenAI API https://platform.openai.com/docs/api-reference/parameter-details.
+    GPTNEOX_API void gptneox_sample_frequency_and_presence_penalties(struct gptneox_context * ctx, gptneox_token_data_array * candidates, gptneox_token * last_tokens, size_t last_tokens_size, float alpha_frequency, float alpha_presence);
+
+    /// @details Sorts candidate tokens by their logits in descending order and calculate probabilities based on logits.
+    GPTNEOX_API void gptneox_sample_softmax(struct gptneox_context * ctx, gptneox_token_data_array * candidates);
+
+    /// @details Top-K sampling described in academic paper "The Curious Case of Neural Text Degeneration" https://arxiv.org/abs/1904.09751
+    GPTNEOX_API void gptneox_sample_top_k(struct gptneox_context * ctx, gptneox_token_data_array * candidates, int k, size_t min_keep);
+
+    /// @details Nucleus sampling described in academic paper "The Curious Case of Neural Text Degeneration" https://arxiv.org/abs/1904.09751
+    GPTNEOX_API void gptneox_sample_top_p(struct gptneox_context * ctx, gptneox_token_data_array * candidates, float p, size_t min_keep);
+
+    /// @details Tail Free Sampling described in https://www.trentonbricken.com/Tail-Free-Sampling/.
+    GPTNEOX_API void gptneox_sample_tail_free(struct gptneox_context * ctx, gptneox_token_data_array * candidates, float z, size_t min_keep);
+
+    /// @details Locally Typical Sampling implementation described in the paper https://arxiv.org/abs/2202.00666.
+    GPTNEOX_API void gptneox_sample_typical(struct gptneox_context * ctx, gptneox_token_data_array * candidates, float p, size_t min_keep);
+    GPTNEOX_API void gptneox_sample_temperature(struct gptneox_context * ctx, gptneox_token_data_array * candidates, float temp);
+
+    /// @details Mirostat 1.0 algorithm described in the paper https://arxiv.org/abs/2007.14966. Uses tokens instead of words.
+    /// @param candidates A vector of `gptneox_token_data` containing the candidate tokens, their probabilities (p), and log-odds (logit) for the current position in the generated text.
+    /// @param tau  The target cross-entropy (or surprise) value you want to achieve for the generated text. A higher value corresponds to more surprising or less predictable text, while a lower value corresponds to less surprising or more predictable text.
+    /// @param eta The learning rate used to update `mu` based on the error between the target and observed surprisal of the sampled word. A larger learning rate will cause `mu` to be updated more quickly, while a smaller learning rate will result in slower updates.
+    /// @param m The number of tokens considered in the estimation of `s_hat`. This is an arbitrary value that is used to calculate `s_hat`, which in turn helps to calculate the value of `k`. In the paper, they use `m = 100`, but you can experiment with different values to see how it affects the performance of the algorithm.
+    /// @param mu Maximum cross-entropy. This value is initialized to be twice the target cross-entropy (`2 * tau`) and is updated in the algorithm based on the error between the target and observed surprisal.
+    GPTNEOX_API gptneox_token gptneox_sample_token_mirostat(struct gptneox_context * ctx, gptneox_token_data_array * candidates, float tau, float eta, int m, float * mu);
+
+    /// @details Mirostat 2.0 algorithm described in the paper https://arxiv.org/abs/2007.14966. Uses tokens instead of words.
+    /// @param candidates A vector of `gptneox_token_data` containing the candidate tokens, their probabilities (p), and log-odds (logit) for the current position in the generated text.
+    /// @param tau  The target cross-entropy (or surprise) value you want to achieve for the generated text. A higher value corresponds to more surprising or less predictable text, while a lower value corresponds to less surprising or more predictable text.
+    /// @param eta The learning rate used to update `mu` based on the error between the target and observed surprisal of the sampled word. A larger learning rate will cause `mu` to be updated more quickly, while a smaller learning rate will result in slower updates.
+    /// @param mu Maximum cross-entropy. This value is initialized to be twice the target cross-entropy (`2 * tau`) and is updated in the algorithm based on the error between the target and observed surprisal.
+    GPTNEOX_API gptneox_token gptneox_sample_token_mirostat_v2(struct gptneox_context * ctx, gptneox_token_data_array * candidates, float tau, float eta, float * mu);
+
+    /// @details Selects the token with the highest probability.
+    GPTNEOX_API gptneox_token gptneox_sample_token_greedy(struct gptneox_context * ctx, gptneox_token_data_array * candidates);
+
+    /// @details Randomly selects a token from the candidates based on their probabilities.
+    GPTNEOX_API gptneox_token gptneox_sample_token(struct gptneox_context * ctx, gptneox_token_data_array * candidates);
 
     // Performance information
     GPTNEOX_API void gptneox_print_timings(struct gptneox_context * ctx);
