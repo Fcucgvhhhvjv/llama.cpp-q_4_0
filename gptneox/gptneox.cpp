@@ -39,26 +39,28 @@
 // OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5
 enum e_model {
     MODEL_UNKNOWN,
-    //MODEL_3B, // StabilityAI Base Alpha 3B
+    MODEL_3B, // StabilityAI Base Alpha 3B
     MODEL_7B,
     MODEL_12B,
     MODEL_20B,
 };
 
-static const size_t MB = 1024*1024;
+static const size_t MiB = 1024*1024;
 
 // computed for n_ctx == 2048
 // TODO: dynamically determine these sizes
+// TODO: To load the stablelm 3B model on my test XR will require some tricks, small ggml context size, mmap support, among others, but is maybe feasible, is a smaller n_ctx required? 512 instead of 2048/4096? Does mmap work as desired on iOS?
 //       needs modifications in ggml
 
 // TODO: Modify for gptneox, how are these values actually determined?
+// TODO: This is now priority, 
 static const std::map<e_model, size_t> & MEM_REQ_SCRATCH0()
 {
     static std::map<e_model, size_t> _MEM_REQ_SCRATCH0 = {
-        //{ MODEL_3B,    512ull * MB },
-        { MODEL_7B,    512ull * MB },
-        { MODEL_12B,   512ull * MB },
-        { MODEL_20B,   512ull * MB },
+        { MODEL_3B,    128ull * MiB },
+        { MODEL_7B,    512ull * MiB },
+        { MODEL_12B,   512ull * MiB },
+        { MODEL_20B,   512ull * MiB },
     };
     return _MEM_REQ_SCRATCH0;
 }
@@ -67,10 +69,10 @@ static const std::map<e_model, size_t> & MEM_REQ_SCRATCH0()
 static const std::map<e_model, size_t> & MEM_REQ_SCRATCH1()
 {
     static std::map<e_model, size_t> _MEM_REQ_SCRATCH1 = {
-        //{ MODEL_3B,    512ull * MB },
-        { MODEL_7B,    512ull * MB },
-        { MODEL_12B,   512ull * MB },
-        { MODEL_20B,   512ull * MB },
+        { MODEL_3B,    128ull * MiB },
+        { MODEL_7B,    512ull * MiB },
+        { MODEL_12B,   512ull * MiB },
+        { MODEL_20B,   512ull * MiB },
     };
     return _MEM_REQ_SCRATCH1;
 }
@@ -81,10 +83,10 @@ static const std::map<e_model, size_t> & MEM_REQ_SCRATCH1()
 static const std::map<e_model, size_t> & MEM_REQ_KV_SELF()
 {
     static std::map<e_model, size_t> _MEM_REQ_KV_SELF = {
-        //{ MODEL_3B,   1026ull * MB },
-        { MODEL_7B,   1026ull * MB },
-        { MODEL_12B,  1608ull * MB },
-        { MODEL_20B,  1608ull * MB },
+        { MODEL_3B,   512ull * MiB },
+        { MODEL_7B,   1026ull * MiB },
+        { MODEL_12B,  1608ull * MiB },
+        { MODEL_20B,  1608ull * MiB },
     };
     return _MEM_REQ_KV_SELF;
 }
@@ -95,10 +97,10 @@ static const std::map<e_model, size_t> & MEM_REQ_KV_SELF()
 static const std::map<e_model, size_t> & MEM_REQ_EVAL()
 {
     static std::map<e_model, size_t> _MEM_REQ_EVAL = {
-        //{ MODEL_3B,   768ull * MB },
-        { MODEL_7B,   768ull * MB },
-        { MODEL_12B, 1024ull * MB },
-        { MODEL_20B, 1024ull * MB },
+        { MODEL_3B,   512ull * MiB },
+        { MODEL_7B,   768ull * MiB },
+        { MODEL_12B, 1024ull * MiB },
+        { MODEL_20B, 1024ull * MiB },
     };
     return _MEM_REQ_EVAL;
 }
@@ -808,7 +810,7 @@ static bool kv_cache_init(
     const int64_t n_mem      = (int64_t)n_layer*n_ctx;
     const int64_t n_elements = n_embd*n_mem;
 
-    cache.buf.resize(2u*n_elements*ggml_type_size(wtype) + 2u*MB);
+    cache.buf.resize(2u*n_elements*ggml_type_size(wtype) + 2u*MiB);
 
     struct ggml_init_params params;
     params.mem_size   = cache.buf.size;
@@ -886,10 +888,11 @@ static const char *gptneox_ftype_name(enum gptneox_ftype ftype) {
 
 static const char *gptneox_model_type_name(e_model type) {
     switch (type) {
-        //case MODEL_3B: return "3B";
+        case MODEL_3B: return "3B";
         case MODEL_7B: return "7B";
         case MODEL_12B: return "12B";
         case MODEL_20B: return "20B";
+        case MODEL_UNKNOWN: return "UNKNOWN";
         default: GPTNEOX_ASSERT(false);
     }
 }
@@ -917,8 +920,14 @@ static void gptneox_model_load_internal(
     
     {
         switch (hparams.n_layer) {
-            //case 16: model.type = e_model::MODEL_3B; break;
-            case 16: model.type = e_model::MODEL_7B; break;
+            case 16: {
+                if (hparams.n_embd < 6144) {
+                    model.type = e_model::MODEL_3B;
+                } else {
+                    model.type = e_model::MODEL_7B;
+                }
+                break;
+            }
             case 36: model.type = e_model::MODEL_12B; break;
             case 44: model.type = e_model::MODEL_20B; break;
         }
@@ -948,7 +957,7 @@ static void gptneox_model_load_internal(
 
     size_t ctx_size, mmapped_size;
     ml->calc_sizes(&ctx_size, &mmapped_size);
-    fprintf(stderr, "%s: ggml ctx size = %6.2f KB\n", __func__, ctx_size/1024.0);
+    fprintf(stderr, "%s: ggml ctx size = %6.2f KiB\n", __func__, ctx_size/1024.0);
 
     // print memory requirements
     {
@@ -966,7 +975,7 @@ static void gptneox_model_load_internal(
         const size_t mem_required_state =
             scale*MEM_REQ_KV_SELF().at(model.type);
 
-        fprintf(stderr, "%s: mem required  = %7.2f MB (+ %7.2f MB per state)\n", __func__,
+        fprintf(stderr, "%s: mem required  = %7.2f MiB (+ %7.2f MiB per state)\n", __func__,
                 mem_required / 1024.0 / 1024.0, mem_required_state / 1024.0 / 1024.0);
     }
 
@@ -1428,7 +1437,7 @@ static bool gptneox_eval_internal(
     }
 
 #if 0
-    printf("\n%s: used_mem = %.3f MB, scratch -- %.3f MB %.3f MB\n", __func__,
+    printf("\n%s: used_mem = %.3f MiB, scratch -- %.3f MiB %.3f MiB\n", __func__,
             ggml_used_mem(ctx0)/1024.0/1024.0,
             lctx.get_buf_max_mem(0)/1024.0/1024.0,
             lctx.get_buf_max_mem(1)/1024.0/1024.0);
@@ -1812,7 +1821,7 @@ static void gptneox_model_quantize_internal(const std::string & fname_inp, const
             new_type = tensor.type;
             new_data = tensor.data;
             new_size = tensor.size;
-            printf("size = %8.3f MB\n", tensor.size/1024.0/1024.0);
+            printf("size = %8.3f MiB\n", tensor.size/1024.0/1024.0);
         } else {
             new_type = quantized_type;
             float * f32_data;
@@ -1871,7 +1880,7 @@ static void gptneox_model_quantize_internal(const std::string & fname_inp, const
                 for (int it = 0; it < nthread_use - 1; ++it) workers[it].join();
             }
 
-            printf("size = %8.2f MB -> %8.2f MB | hist: ", tensor.size/1024.0/1024.0, new_size/1024.0/1024.0);
+            printf("size = %8.2f MiB -> %8.2f MiB | hist: ", tensor.size/1024.0/1024.0, new_size/1024.0/1024.0);
             for (size_t i = 0; i < hist_cur.size(); i++) {
                 hist_all[i] += hist_cur[i];
             }
@@ -1886,8 +1895,8 @@ static void gptneox_model_quantize_internal(const std::string & fname_inp, const
         file_saver.write_tensor(tensor, new_type, new_data, new_size);
     }
 
-    printf("%s: model size  = %8.2f MB\n", __func__, total_size_org/1024.0/1024.0);
-    printf("%s: quant size  = %8.2f MB\n", __func__, total_size_new/1024.0/1024.0);
+    printf("%s: model size  = %8.2f MiB\n", __func__, total_size_org/1024.0/1024.0);
+    printf("%s: quant size  = %8.2f MiB\n", __func__, total_size_new/1024.0/1024.0);
 
     {
         int64_t sum_all = 0;
@@ -1958,7 +1967,7 @@ struct gptneox_context * gptneox_init_from_file(
 
         {
             const size_t memory_size = ggml_nbytes(ctx->model.kv_self.k) + ggml_nbytes(ctx->model.kv_self.v);
-            fprintf(stderr, "%s: kv self size  = %7.2f MB\n", __func__, memory_size / 1024.0 / 1024.0);
+            fprintf(stderr, "%s: kv self size  = %7.2f MiB\n", __func__, memory_size / 1024.0 / 1024.0);
         }
 
         const auto & hparams = ctx->model.hparams;

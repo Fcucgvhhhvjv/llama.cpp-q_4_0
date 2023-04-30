@@ -22,7 +22,7 @@ int main(int argc, char ** argv) {
     ggml_time_init();
 
     if (argc < 4) {
-        fprintf(stderr, "usage: %s model-f32.bin model-quant.bin type [nthread]\n", argv[0]);
+        fprintf(stderr, "usage: %s model-f32.bin model-quant.bin ftype\n", argv[0]);
         for (auto it = GPTNEOX_FTYPE_MAP.begin(); it != GPTNEOX_FTYPE_MAP.end(); it++) {
             fprintf(stderr, "  type = \"%s\" or %d\n", it->first.c_str(), it->second);
         }
@@ -51,32 +51,7 @@ int main(int argc, char ** argv) {
         ftype = (enum gptneox_ftype)atoi(argv[3]);
     }
 
-    int nthread = argc > 4 ? atoi(argv[4]) : 0;
-
-    const int64_t t_main_start_us = ggml_time_us();
-
-    int64_t t_quantize_us = 0;
-
-    // load the model
-    {
-        const int64_t t_start_us = ggml_time_us();
-
-        if (gptneox_model_quantize(fname_inp.c_str(), fname_out.c_str(), ftype, nthread)) {
-            fprintf(stderr, "%s: failed to quantize model from '%s'\n", __func__, fname_inp.c_str());
-            return 1;
-        }
-
-        t_quantize_us = ggml_time_us() - t_start_us;
-    }
-
-    // report timing
-    {
-        const int64_t t_main_end_us = ggml_time_us();
-
-        printf("\n");
-        printf("%s: quantize time = %8.2f ms\n", __func__, t_quantize_us/1000.0);
-        printf("%s:    total time = %8.2f ms\n", __func__, (t_main_end_us - t_main_start_us)/1000.0);
-    }
+    gptneox_model_copy(fname_inp.c_str(), fname_out.c_str(), ftype);
 
     return 0;
 }
