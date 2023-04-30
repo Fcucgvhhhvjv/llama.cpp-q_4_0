@@ -176,7 +176,7 @@ ggml.o: ggml.c ggml.h ggml-cuda.h
 llama.o: llama.cpp ggml.h ggml-cuda.h llama.h llama-util.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 	
-gptneox.o: gptneox/gptneox.cpp ggml.h gptneox/gptneox.h gptneox/gptneox_util.h
+gptneox.o: gptneox/gptneox.cpp ggml.h gptneox/gptneox.h gptneox/gptneox-util.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 common.o: examples/common.cpp examples/common.h

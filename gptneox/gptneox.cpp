@@ -5,7 +5,7 @@
 #include <cstdio>
 #endif
 
-#include "gptneox_util.h"
+#include "gptneox-util.h"
 #include "gptneox.h"
 
 #include "../ggml.h"
@@ -506,7 +506,6 @@ struct gptneox_file_loader {
                 case GGML_TYPE_Q4_0:
                 case GGML_TYPE_Q4_1:
                 case GGML_TYPE_Q4_2:
-                case GGML_TYPE_Q4_3:
                 case GGML_TYPE_Q5_0:
                 case GGML_TYPE_Q5_1:
                 case GGML_TYPE_Q8_0:
@@ -585,7 +584,6 @@ struct gptneox_file_saver {
             case GGML_TYPE_Q4_0:
             case GGML_TYPE_Q4_1:
             case GGML_TYPE_Q4_2:
-            case GGML_TYPE_Q4_3:
             case GGML_TYPE_Q5_0:
             case GGML_TYPE_Q5_1:
             case GGML_TYPE_Q8_0:
@@ -1767,7 +1765,6 @@ static void gptneox_model_quantize_internal(const std::string & fname_inp, const
         case GPTNEOX_FTYPE_MOSTLY_Q4_0: quantized_type = GGML_TYPE_Q4_0; break;
         case GPTNEOX_FTYPE_MOSTLY_Q4_1: quantized_type = GGML_TYPE_Q4_1; break;
         case GPTNEOX_FTYPE_MOSTLY_Q4_2: quantized_type = GGML_TYPE_Q4_2; break;
-        case GPTNEOX_FTYPE_MOSTLY_Q4_3: quantized_type = GGML_TYPE_Q4_3; break;
         case GPTNEOX_FTYPE_MOSTLY_Q5_0: quantized_type = GGML_TYPE_Q5_0; break;
         case GPTNEOX_FTYPE_MOSTLY_Q5_1: quantized_type = GGML_TYPE_Q5_1; break;
         case GPTNEOX_FTYPE_MOSTLY_Q8_0: quantized_type = GGML_TYPE_Q8_0; break;
