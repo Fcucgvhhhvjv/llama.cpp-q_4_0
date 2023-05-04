@@ -23,7 +23,10 @@ build-sanitize-thread/
 models/*
 
 /main
+/main-gptneox
+/main-oasst
 /quantize
+/quantize-gptneox
 /quantize-stats
 /result
 /perplexity
