@@ -29,8 +29,6 @@
 #include <mutex>
 #include <sstream>
 
-// TODO: Add back in n_ctx (max_position_embeddings) to ggml model, it is currently hard-coded to 2048 max for llama
-
 #define GPTNEOX_USE_SCRATCH
 #define GPTNEOX_MAX_SCRATCH_BUFFERS 16
 
@@ -476,10 +474,9 @@ struct gptneox_file_loader {
             std::string word = file.read_string(len);
 
             float score = 0.0f;
-            // TODO: Implement scores in gptneox
-            /*if (file_version >= GPTNEOX_FILE_VERSION_GGMF_V1) {
+            if (file_version >= GPTNEOX_FILE_VERSION_GGMF_V1) {
                 file.read_raw(&score, sizeof(score));
-            }*/
+            }
 
             vocab.token_to_id[word] = i;
 
@@ -573,8 +570,7 @@ struct gptneox_file_saver {
             const auto & token_score = any_file_loader->vocab.id_to_token.at(i);
             file.write_u32((uint32_t) token_score.tok.size());
             file.write_raw(token_score.tok.data(), token_score.tok.size());
-            // TODO: Implement scores in gptneox?
-            //file.write_raw(&token_score.score, sizeof(token_score.score));
+            file.write_raw(&token_score.score, sizeof(token_score.score));
         }
     }
     void write_tensor(gptneox_load_tensor & tensor, enum ggml_type new_type, const void * new_data, size_t new_size) {
@@ -2012,14 +2008,15 @@ gptneox_token gptneox_sample_token(struct gptneox_context * ctx, gptneox_token_d
 }
 
 //
-// quantization
+// updating
 //
 
-// temp - load then save model, allows for load and save to be different
-static void gptneox_model_copy_internal(const std::string & fname_inp, const std::string & fname_out, enum gptneox_ftype ftype) {
+static void gptneox_model_update_internal(const std::string & fname_inp, const std::string & fname_out) {
     std::unique_ptr<gptneox_model_loader> model_loader(new gptneox_model_loader(fname_inp.c_str(),
                                                             /*use_mmap*/ false,
                                                             /*vocab_only*/ false));
+    // Simply use the ftype of the first file
+    auto ftype = model_loader->file_loaders[0]->hparams.ftype;
     gptneox_file_saver file_saver(fname_out.c_str(), model_loader->file_loaders.at(0).get(), ftype);
 
     size_t idx = 0;
@@ -2038,12 +2035,11 @@ static void gptneox_model_copy_internal(const std::string & fname_inp, const std
     }
 }
 
-int gptneox_model_copy(
+int gptneox_model_update(
         const char * fname_inp,
-        const char * fname_out,
-  enum gptneox_ftype   ftype) {
+        const char * fname_out) {
     try {
-        gptneox_model_copy_internal(fname_inp, fname_out, ftype);
+        gptneox_model_update_internal(fname_inp, fname_out);
         return 0;
     } catch (const std::string & err) {
         fprintf(stderr, "%s: failed to copy: %s\n", __func__, err.c_str());
@@ -2051,6 +2047,9 @@ int gptneox_model_copy(
     }
 }
 
+//
+// quantization
+//
 
 static void gptneox_model_quantize_internal(const std::string & fname_inp, const std::string & fname_out, enum gptneox_ftype ftype, int nthread) {
     ggml_type quantized_type;

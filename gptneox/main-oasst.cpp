@@ -334,6 +334,10 @@ int main(int argc, char ** argv) {
                 for (auto it = params.logit_bias.begin(); it != params.logit_bias.end(); it++) {
                     logits[it->first] += it->second;
                 }
+                
+                // Lets add some custom logit biases that will always help
+                gptneox_token backslash_token = gptneox_str_to_token(ctx, "\\");
+                logits[backslash_token] = -INFINITY;
 
                 std::vector<gptneox_token_data> candidates;
                 candidates.reserve(n_vocab);

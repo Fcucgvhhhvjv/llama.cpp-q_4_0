@@ -107,10 +107,9 @@ extern "C" {
       enum gptneox_ftype   ftype,
             int          nthread);
 
-    GPTNEOX_API int gptneox_model_copy(
+    GPTNEOX_API int gptneox_model_update(
             const char * fname_inp,
-            const char * fname_out,
-            enum gptneox_ftype   ftype);
+            const char * fname_out);
 
     // Apply a LoRA adapter to a loaded model
     // path_base_model is the path to a higher quality model to use as a base for

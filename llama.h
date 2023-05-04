@@ -107,6 +107,10 @@ extern "C" {
       enum llama_ftype   ftype,
             int          nthread);
 
+    LLAMA_API int llama_model_update(
+        const char * fname_inp,
+        const char * fname_out);
+
     // Apply a LoRA adapter to a loaded model
     // path_base_model is the path to a higher quality model to use as a base for
     // the layers modified by the adapter. Can be NULL to use the current loaded model.
