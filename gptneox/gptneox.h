@@ -126,6 +126,9 @@ extern "C" {
     // Returns the number of tokens in the KV cache
     GPTNEOX_API int gptneox_get_kv_cache_token_count(struct gptneox_context * ctx);
 
+    // Shifts the KV cache effectively removing the first n tokens
+    GPTNEOX_API void gptneox_shift_kv_cache(struct gptneox_context * ctx, int n);
+
     // Sets the current rng seed.
     GPTNEOX_API void gptneox_set_rng_seed(struct gptneox_context * ctx, int seed);
 

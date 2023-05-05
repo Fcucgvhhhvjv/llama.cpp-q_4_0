@@ -55,7 +55,7 @@ static const size_t MiB = 1024*1024;
 static const std::map<e_model, size_t> & MEM_REQ_SCRATCH0()
 {
     static std::map<e_model, size_t> _MEM_REQ_SCRATCH0 = {
-        { MODEL_3B,    128ull * MiB },
+        { MODEL_3B,    256ull * MiB },
         { MODEL_7B,    512ull * MiB },
         { MODEL_12B,   512ull * MiB },
         { MODEL_20B,   512ull * MiB },
@@ -67,7 +67,7 @@ static const std::map<e_model, size_t> & MEM_REQ_SCRATCH0()
 static const std::map<e_model, size_t> & MEM_REQ_SCRATCH1()
 {
     static std::map<e_model, size_t> _MEM_REQ_SCRATCH1 = {
-        { MODEL_3B,    128ull * MiB },
+        { MODEL_3B,    256ull * MiB },
         { MODEL_7B,    512ull * MiB },
         { MODEL_12B,   512ull * MiB },
         { MODEL_20B,   512ull * MiB },
@@ -796,8 +796,8 @@ struct gptneox_model_loader {
 static bool kv_cache_init(
         const struct gptneox_hparams & hparams,
              struct gptneox_kv_cache & cache,
-                         ggml_type   wtype,
-                               int   n_ctx) {
+                           ggml_type   wtype,
+                                 int   n_ctx) {
     const int n_embd  = hparams.n_embd;
     const int n_layer = hparams.n_layer;
 
@@ -1188,8 +1188,8 @@ static bool gptneox_eval_internal(
             // MARK: gptneox RoPE Q and K, before cache
             // Bit 2 for gptneox style (2)
             // Bit 1 is zero for dont skip n_past +(0), use (2+1) = (3) if rope is applied to cache of k (after cache only)
-            Qcur = ggml_rope(ctx0, Qcur, n_past, n_rot, 2);
-            Kcur = ggml_rope(ctx0, Kcur, n_past, n_rot, 2); //3);
+            //Qcur = ggml_rope(ctx0, Qcur, n_past, n_rot, 2);
+            //Kcur = ggml_rope(ctx0, Kcur, n_past, n_rot, 2); //3);
 
             // store key and value to memory, not required if prompt if only a single token (not practical or likely)
             //if (N >= 1) {
@@ -1215,6 +1215,22 @@ static bool gptneox_eval_internal(
                 ggml_build_forward_expand(&gf, ggml_cpy(ctx0, Vcur, v));
             //}
             
+            // Test RoPE after kv cache
+            // for when we want to keep as much of the context as possible, we do not want to recalc kv weights
+            // but positional encoding will change when old tokens are removed
+            // Q is not cached so it is simply the same as the before version
+            Qcur = ggml_rope(ctx0, Qcur, n_past, n_rot, 2);
+            // RoPE all in k cache
+            // TODO: Should be able to replace view 1d and reshape 3d with a single view 3d
+            // Do we need a larger scratch for this temp duplication?
+            struct ggml_tensor * Kall = ggml_dup(ctx0,
+                                            ggml_reshape_3d(ctx0,
+                                                ggml_view_1d(ctx0, kv_self.k,
+                                                    (n_past + N) * n_embd,
+                                                    ggml_element_size(kv_self.k) * il * n_ctx * n_embd),
+                                                n_embd/n_head, n_head, n_past + N));
+            Kall = ggml_rope(ctx0, Kall, 0 /*n_past*/, n_rot, 2); //3);
+            
             // Q = Qcur.contiguous().view(n_embd/n_head, n_head, N).permute(0, 2, 1, 3)
             struct ggml_tensor * Q =
                 ggml_permute(ctx0,
@@ -1223,12 +1239,12 @@ static bool gptneox_eval_internal(
 
             // K = Kmem.view(n_embd/n_head, n_head, n_past + N).permute(0, 2, 1, 3)
             struct ggml_tensor * K =
-                ggml_permute(ctx0,
-                        ggml_reshape_3d(ctx0,
+                ggml_permute(ctx0, Kall,
+                        /*ggml_reshape_3d(ctx0,
                             ggml_view_1d(ctx0, kv_self.k,
                                 (n_past + N) * n_embd,
                                 ggml_element_size(kv_self.k) * il * n_ctx * n_embd),
-                            n_embd/n_head, n_head, n_past + N),
+                            n_embd/n_head, n_head, n_past + N),*/
                         0, 2, 1, 3);
 
             // K * Q
@@ -2549,6 +2565,35 @@ int gptneox_apply_lora_from_file(struct gptneox_context * ctx, const char * path
 
 int gptneox_get_kv_cache_token_count(struct gptneox_context * ctx) {
     return ctx->model.kv_self.n;
+}
+
+// Assumes contiguous data
+void gptneox_shift_kv_cache(struct gptneox_context * ctx, int n) {
+    auto & model = ctx->model;
+    auto & kv_self = model.kv_self;
+    auto & hparams = model.hparams;
+    auto n_layer = hparams.n_layer;
+    auto n_embd = hparams.n_embd;
+    auto n_ctx = hparams.n_ctx;
+    for(int il = 0; il < n_layer; il++) {
+        // K: Embeddings are in regular order so moving them is easy as copying the memory
+        {
+            int elem_byte_size = ggml_element_size(kv_self.k);
+            uint8_t * dst_ptr = ((uint8_t *)kv_self.k->data) + (elem_byte_size * n_embd * (il * n_ctx));
+            uint8_t * src_ptr = ((uint8_t *)kv_self.k->data) + (elem_byte_size * n_embd * (il * n_ctx + n));
+            memcpy(dst_ptr, src_ptr, elem_byte_size * n_embd * (n_ctx - n));
+        }
+        
+        // V: Embeddings are transposed so each embedding element must be copied separately
+        {
+            int elem_byte_size = ggml_element_size(kv_self.v);
+            for(int i = 0; i < n_embd; i++) {
+                uint8_t * dst_ptr = ((uint8_t *)kv_self.v->data) + (elem_byte_size * (il * n_ctx * i));
+                uint8_t * src_ptr = ((uint8_t *)kv_self.v->data) + (elem_byte_size * (il * n_ctx * i + n));
+                memcpy(dst_ptr, src_ptr, elem_byte_size * (n_ctx - n));
+            }
+        }
+    }
 }
 
 #define GPTNEOX_MAX_RNG_STATE 64*1024

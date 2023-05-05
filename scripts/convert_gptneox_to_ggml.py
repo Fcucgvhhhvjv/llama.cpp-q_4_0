@@ -77,12 +77,14 @@ fn_bin = f"/ggml-{model_name.split('/')[-1]}-{ftype_str[ftype]}.bin"
 fn_out = dir_out + fn_bin
 fout = open(fn_out, "wb")
 
-ggml_file_magic = 0x67676d66 # 0x67676d6c is unversioned
-ggml_file_version = 0x00000001 # v1
+# 0x67676d6c is unversioned ggml
+# 0x67676d66 is versioned ggmf (requires token scores)
+ggml_file_magic = 0x67676d6c
+#ggml_file_version = 0x00000001 # v1
 
 hparams["multiple_of"] = 1
-fout.write(struct.pack("i", ggml_file_magic)) # magic: ggmf in hex
-fout.write(struct.pack("i", ggml_file_version))
+fout.write(struct.pack("i", ggml_file_magic)) # magic: ggml in hex
+#fout.write(struct.pack("i", ggml_file_version))
 fout.write(struct.pack("i", hparams["vocab_size"]))
 fout.write(struct.pack("i", hparams["max_position_embeddings"]))
 fout.write(struct.pack("i", hparams["hidden_size"]))
