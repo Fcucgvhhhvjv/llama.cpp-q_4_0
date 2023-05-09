@@ -197,15 +197,6 @@ extern "C" {
     GPTNEOX_API gptneox_token gptneox_token_eos();
     // GPTNEOX_API gptneox_token gptneox_token_nl();
 
-    // TODO: improve the last_n_tokens interface ?
-    GPTNEOX_API gptneox_token gptneox_sample_top_p_top_k(
-       struct gptneox_context * ctx,
-          const gptneox_token * last_n_tokens_data,
-                        int   last_n_tokens_size,
-                        int   top_k,
-                      float   top_p,
-                      float   temp,
-                      float   repeat_penalty);
 
     // Sampling functions
 

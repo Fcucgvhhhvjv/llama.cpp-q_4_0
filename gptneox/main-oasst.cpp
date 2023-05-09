@@ -176,10 +176,6 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "generate: n_ctx = %d, n_batch = %d, n_predict = %d, n_keep = %d\n", params.n_ctx, params.n_batch, params.n_predict, params.n_keep);
     fprintf(stderr, "\n\n");
     
-    // TODO: replace with ring-buffer
-    std::vector<gptneox_token> last_n_tokens = std::vector<gptneox_token>();
-    //std::fill(last_n_tokens.begin(), last_n_tokens.end(), 0);
-    
     set_console_color(con_st, CONSOLE_COLOR_PROMPT);
     
     if (params.interactive) {
@@ -196,11 +192,12 @@ int main(int argc, char ** argv) {
     const float   temp           = params.temp;
     const float   repeat_penalty = params.repeat_penalty;
     
+    std::vector<std::vector<gptneox_token>> past = std::vector<std::vector<gptneox_token>>();
+    int n_past = 0;
+    
     // Chat loop
     while (true) {
         is_interacting = true;
-        
-        int n_past = 0;
         
         // Get input
         
@@ -260,52 +257,60 @@ int main(int argc, char ** argv) {
         }
         
         // Tokenize prompt with oasst special tokens
-        auto prompt_embd = ::gptneox_tokenize(ctx, buffer, false);
-        auto embd_inp = std::vector<gptneox_token>();
-        embd_inp.push_back(prompter_id);
-        embd_inp.insert(embd_inp.end(), prompt_embd.begin(), prompt_embd.end());
-        embd_inp.push_back(endoftext_id);
-        embd_inp.push_back(assistant_id);
+        auto prompt = ::gptneox_tokenize(ctx, buffer, false);
+        auto input = std::vector<gptneox_token>();
+        input.push_back(prompter_id);
+        input.insert(input.end(), prompt.begin(), prompt.end());
+        input.push_back(endoftext_id);
+        input.push_back(assistant_id);
+        
+        // Keep input in past
+        past.push_back(input);
         
         // Verbose prompt
         if (params.verbose_prompt) {
             fprintf(stderr, "\n");
             fprintf(stderr, "%s: prompt: '%s'\n", __func__, buffer.c_str());
-            fprintf(stderr, "%s: number of tokens in prompt = %zu\n", __func__, embd_inp.size());
-            for (int i = 0; i < (int) embd_inp.size(); i++) {
-                fprintf(stderr, "%6d -> '%s'\n", embd_inp[i], gptneox_token_to_str(ctx, embd_inp[i]));
+            fprintf(stderr, "%s: number of tokens in prompt = %zu\n", __func__, input.size());
+            for (int i = 0; i < (int) input.size(); i++) {
+                fprintf(stderr, "%6d -> '%s'\n", input[i], gptneox_token_to_str(ctx, input[i]));
             }
-            /*if (params.n_keep > 0) {
-            fprintf(stderr, "%s: static prompt based on n_keep: '", __func__);
-                for (int i = 0; i < params.n_keep; i++) {
-                    fprintf(stderr, "%s", gptneox_token_to_str(ctx, embd_inp[i]));
-                }
-                fprintf(stderr, "'\n");
-            }
-             */
             fprintf(stderr, "\n");
-        }
-        
-        // How many tokens to generate - check if theres space in context for atleast one token (or batch size tokens?)
-        auto inp_size = embd_inp.size();
-        auto space = params.n_ctx - inp_size;
-        if(space <= 0) {
-            fprintf(stderr, "%s : input too long\n", __func__);
-            continue;
-        }
-        // Send batches to eval
-        while (n_past < inp_size) {
-            auto remaining = inp_size - n_past;
-            int n_eval = params.n_batch < remaining ? params.n_batch : remaining;
-            if (gptneox_eval(ctx, &embd_inp[n_past], n_eval, n_past, params.n_threads)) {
-                fprintf(stderr, "%s : failed to eval\n", __func__);
-                return 1;
-            }
-            n_past += n_eval;
         }
         
         const int n_ctx = gptneox_n_ctx(ctx);
         const int n_vocab = gptneox_n_vocab(ctx);
+        
+        // How many tokens to generate - check if theres space in context for atleast one token (or batch size tokens?)
+        auto n_input = input.size();
+        if (n_input > n_ctx) {
+            fprintf(stderr, "%s : input too long\n", __func__);
+            continue;
+        }
+        
+        // Check if we need to forget
+        auto n_total = n_past + n_input;
+        while (n_total > n_ctx) {
+            auto n_forget = past.front().size();
+            past.erase(past.begin());
+            gptneox_shift_kv_cache(ctx, n_forget);
+            n_past -= n_forget;
+            n_total -= n_forget;
+            //fprintf(stderr, "%s : %d tokens purged from context memory\n", __func__, n_forget);
+        }
+        
+        // Send batches to eval
+        auto input_i = 0;
+        while (input_i < n_input) {
+            auto remaining = n_input - input_i;
+            int n_eval = params.n_batch < remaining ? params.n_batch : remaining;
+            if (gptneox_eval(ctx, &input[input_i], n_eval, n_past, params.n_threads)) {
+                fprintf(stderr, "%s : failed to eval\n", __func__);
+                return 1;
+            }
+            input_i += n_eval;
+            n_past += n_eval;
+        }
         
         const float   temp            = params.temp;
         const int32_t top_k           = params.top_k <= 0 ? gptneox_n_vocab(ctx) : params.top_k;
@@ -322,8 +327,11 @@ int main(int argc, char ** argv) {
         const bool    penalize_nl     = params.penalize_nl;
         
         // Eval until space runs out
-        auto out_count = 0;
-        while (space > 0) {
+        std::vector<gptneox_token> repeat = std::vector<gptneox_token>();
+        std::vector<gptneox_token> output = std::vector<gptneox_token>();
+        // Loop
+        bool output_enabled = true;
+        while (output_enabled) {
             // Get token
             gptneox_token id = 0;
             
@@ -350,12 +358,12 @@ int main(int argc, char ** argv) {
                 // Apply penalties
                 gptneox_token nl_token = gptneox_str_to_token(ctx, "\n");
                 float nl_logit = logits[nl_token];
-                auto last_n_repeat = std::min(std::min((int)last_n_tokens.size(), repeat_last_n), n_ctx);
+                auto last_n_repeat = std::min(std::min((int)repeat.size(), repeat_last_n), n_ctx);
                 gptneox_sample_repetition_penalty(ctx, &candidates_p,
-                    last_n_tokens.data() + last_n_tokens.size() - last_n_repeat,
+                    repeat.data() + repeat.size() - last_n_repeat,
                     last_n_repeat, repeat_penalty);
                 gptneox_sample_frequency_and_presence_penalties(ctx, &candidates_p,
-                    last_n_tokens.data() + last_n_tokens.size() - last_n_repeat,
+                    repeat.data() + repeat.size() - last_n_repeat,
                     last_n_repeat, alpha_frequency, alpha_presence);
                 if (!penalize_nl) {
                     logits[nl_token] = nl_logit;
@@ -386,28 +394,30 @@ int main(int argc, char ** argv) {
                 }
             }
             
-            // Inc out count and dec space
-            out_count += 1;
-            space -= 1;
+            // Add output to array
+            output.push_back(id);
             // Repeat tokens update
-            last_n_tokens.push_back(id);
-            if (last_n_tokens.size() > params.repeat_last_n) {
-                last_n_tokens.erase(last_n_tokens.begin());
+            repeat.push_back(id);
+            if (repeat.size() > params.repeat_last_n) {
+                repeat.erase(repeat.begin());
             }
             // Check for eos - end early - check eos before bos in case they are the same
             if (id == gptneox_token_eos()) {
-                space = 0;
+                output_enabled = false;
                 continue;
             }
             // Check for bos - skip callback if so
+            bool skip_callback = false;
             if (id == gptneox_token_bos()) {
-                continue;
+                skip_callback = true;
             }
             // Convert token to string and display
-            printf("%s", gptneox_token_to_str(ctx, id));
-            fflush(stdout);
+            if (!skip_callback) {
+                printf("%s", gptneox_token_to_str(ctx, id));
+                fflush(stdout);
+            }
             // Check if we need to run another eval
-            if (space > 0) {
+            if (output_enabled) {
                 // Send generated token back into model for next generation
                 if (gptneox_eval(ctx, &id, 1, n_past, params.n_threads)) {
                     fprintf(stderr, "%s : failed to eval\n", __func__);
@@ -415,12 +425,32 @@ int main(int argc, char ** argv) {
                 }
                 // Increment past count
                 n_past += 1;
+                // Check if we need to forget
+                if (n_past > n_ctx) {
+                    // Not enough room to predict even a single token so purge oldest from past and kv cache
+                    // If nothing in past to purge so simply remove tokens from the beginning of the response
+                    // Remove a batch of 8 or 16 tokens from beginning of response if no past, this helps reduce the frequency of shifts, but will make the model forget quicker if the forget batch size is too high
+                    // In theory, the model can continue to build a response infinitely
+                    int n_forget = 16; //8 //1
+                    if (past.size() > 0) {
+                        n_forget = past.front().size();
+                        past.erase(past.begin());
+                    }
+                    gptneox_shift_kv_cache(ctx, n_forget);
+                    n_past -= n_forget;
+                    //fprintf(stderr, "%s : %d tokens purged from context memory\n", __func__, n_forget);
+                }
             }
             // Check for user interrupt
-            if (is_interacting) { space = 0; }
+            if (is_interacting) {
+                output_enabled = false;
+            }
         }
+        // Update past with most recent response
+        past.push_back(output);
         printf("\n");
         fflush(stdout);
+        //fprintf(stderr, "%s : past token count %d/%d\n", __func__, n_past, n_ctx);
     }
     
 #if defined (_WIN32)
