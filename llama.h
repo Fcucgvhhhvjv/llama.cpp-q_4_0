@@ -126,6 +126,9 @@ extern "C" {
     // Returns the number of tokens in the KV cache
     LLAMA_API int llama_get_kv_cache_token_count(struct llama_context * ctx);
 
+    // Shifts the KV cache effectively removing the first n tokens
+    LLAMA_API void llama_shift_kv_cache(struct llama_context * ctx, int n);
+
     // Sets the current rng seed.
     LLAMA_API void llama_set_rng_seed(struct llama_context * ctx, int seed);
 
