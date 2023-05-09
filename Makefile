@@ -107,7 +107,11 @@ ifndef LLAMA_NO_ACCELERATE
 endif
 ifdef LLAMA_OPENBLAS
 	CFLAGS  += -DGGML_USE_OPENBLAS -I/usr/local/include/openblas
-	LDFLAGS += -lopenblas
+	ifneq ($(shell grep -e "Arch Linux" -e "ID_LIKE=arch" /etc/os-release 2>/dev/null),)
+		LDFLAGS += -lopenblas -lcblas
+	else
+		LDFLAGS += -lopenblas
+	endif
 endif
 ifdef LLAMA_CUBLAS
 	CFLAGS    += -DGGML_USE_CUBLAS -I/usr/local/cuda/include -I/opt/cuda/include -I$(CUDA_PATH)/targets/x86_64-linux/include
@@ -121,7 +125,12 @@ ggml-cuda.o: ggml-cuda.cu ggml-cuda.h
 endif
 ifdef LLAMA_CLBLAST
 	CFLAGS  += -DGGML_USE_CLBLAST
-	LDFLAGS += -lclblast -lOpenCL
+	# Mac provides OpenCL as a framework
+	ifeq ($(UNAME_S),Darwin)
+		LDFLAGS += -lclblast -framework OpenCL
+	else
+		LDFLAGS += -lclblast -lOpenCL
+	endif
 	OBJS    += ggml-opencl.o
 ggml-opencl.o: ggml-opencl.c ggml-opencl.h
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -135,19 +144,21 @@ ifdef LLAMA_PERF
 	CXXFLAGS += -DGGML_PERF
 endif
 ifneq ($(filter aarch64%,$(UNAME_M)),)
+	# Apple M1, M2, etc.
+	# Raspberry Pi 3, 4, Zero 2 (64-bit)
 	CFLAGS   += -mcpu=native
 	CXXFLAGS += -mcpu=native
 endif
 ifneq ($(filter armv6%,$(UNAME_M)),)
-	# Raspberry Pi 1, 2, 3
+	# Raspberry Pi 1, Zero
 	CFLAGS += -mfpu=neon-fp-armv8 -mfp16-format=ieee -mno-unaligned-access
 endif
 ifneq ($(filter armv7%,$(UNAME_M)),)
-	# Raspberry Pi 4
+	# Raspberry Pi 2
 	CFLAGS += -mfpu=neon-fp-armv8 -mfp16-format=ieee -mno-unaligned-access -funsafe-math-optimizations
 endif
 ifneq ($(filter armv8%,$(UNAME_M)),)
-	# Raspberry Pi 4
+	# Raspberry Pi 3, 4, Zero 2 (32-bit)
 	CFLAGS += -mfp16-format=ieee -mno-unaligned-access
 endif
 
@@ -184,62 +195,77 @@ common.o: examples/common.cpp examples/common.h
 	
 common-gptneox.o: gptneox/common-gptneox.cpp gptneox/common-gptneox.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
-
-clean:
-	rm -vf *.o main main-oasst main-gptneox quantize quantize-gptneox quantize-stats update-llama update-gptneox perplexity embedding benchmark-q4_0-matmult
-
-main: examples/main/main.cpp ggml.o llama.o common.o $(OBJS)
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-	@echo
-	@echo '====  Run ./main -h for help.  ===='
-	@echo
 	
-main-gptneox: gptneox/main-gptneox.cpp ggml.o gptneox.o common-gptneox.o $(OBJS)
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-	@echo
-	@echo '====  Run ./main -h for help.  ===='
-	@echo
-	
-main-oasst: gptneox/main-oasst.cpp ggml.o gptneox.o common-gptneox.o $(OBJS)
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-	@echo
-	@echo '====  Run ./main -h for help.  ===='
-	@echo
-
-quantize: examples/quantize/quantize.cpp ggml.o llama.o $(OBJS)
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-	
-quantize-gptneox: gptneox/quantize-gptneox.cpp ggml.o gptneox.o $(OBJS)
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-
-quantize-stats: examples/quantize-stats/quantize-stats.cpp ggml.o llama.o $(OBJS)
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-		
-update-llama: update-llama.cpp ggml.o llama.o $(OBJS)
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-
-update-gptneox: gptneox/update-gptneox.cpp ggml.o gptneox.o $(OBJS)
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-
-perplexity: examples/perplexity/perplexity.cpp ggml.o llama.o common.o $(OBJS)
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-
-embedding: examples/embedding/embedding.cpp ggml.o llama.o common.o $(OBJS)
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-
-vdot: pocs/vdot/vdot.cpp ggml.o $(OBJS)
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-
 libllama.so: llama.o ggml.o $(OBJS)
 	$(CXX) $(CXXFLAGS) -shared -fPIC -o $@ $^ $(LDFLAGS)
+
+clean:
+	rm -vf *.o main main-oasst main-gptneox quantize quantize-gptneox quantize-stats update-llama update-gptneox perplexity embedding benchmark-matmult  save-load-state build-info.h
+
+#
+# Examples
+#
+
+main: examples/main/main.cpp build-info.h ggml.o llama.o common.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
+	@echo
+	@echo '====  Run ./main -h for help.  ===='
+	@echo
+	
+main-gptneox: gptneox/main-gptneox.cpp build-info.h ggml.o gptneox.o common-gptneox.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
+	@echo
+	@echo '====  Run ./main -h for help.  ===='
+	@echo
+	
+main-oasst: gptneox/main-oasst.cpp build-info.h ggml.o gptneox.o common-gptneox.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
+	@echo
+	@echo '====  Run ./main -h for help.  ===='
+	@echo
+
+quantize: examples/quantize/quantize.cpp build-info.h ggml.o llama.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
+	
+quantize-gptneox: gptneox/quantize-gptneox.cpp build-info.h ggml.o gptneox.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
+
+quantize-stats: examples/quantize-stats/quantize-stats.cpp build-info.h ggml.o llama.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
+		
+update-llama: update-llama.cpp build-info.h ggml.o llama.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
+
+update-gptneox: gptneox/update-gptneox.cpp build-info.h ggml.o gptneox.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
+
+perplexity: examples/perplexity/perplexity.cpp build-info.h ggml.o llama.o common.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
+
+embedding: examples/embedding/embedding.cpp build-info.h ggml.o llama.o common.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
+
+save-load-state: examples/save-load-state/save-load-state.cpp build-info.h ggml.o llama.o common.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
+
+build-info.h: $(wildcard .git/index) scripts/build-info.sh
+	@sh scripts/build-info.sh > $@.tmp
+	@if ! cmp -s $@.tmp $@; then \
+		mv $@.tmp $@; \
+	else \
+		rm $@.tmp; \
+	fi
 
 #
 # Tests
 #
 
-benchmark: examples/benchmark/benchmark-q4_0-matmult.c ggml.o $(OBJS)
-	$(CXX) $(CXXFLAGS) $^ -o benchmark-q4_0-matmult $(LDFLAGS)
-	./benchmark-q4_0-matmult
+benchmark-matmult: examples/benchmark/benchmark-matmult.cpp build-info.h ggml.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
+	./$@
+
+vdot: pocs/vdot/vdot.cpp ggml.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 .PHONY: tests
 tests:

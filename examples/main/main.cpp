@@ -5,6 +5,7 @@
 
 #include "common.h"
 #include "llama.h"
+#include "build-info.h"
 
 #include <cassert>
 #include <cinttypes>
@@ -21,6 +22,9 @@
 #include <signal.h>
 #include <unistd.h>
 #elif defined (_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
 #include <signal.h>
 #endif
 
@@ -31,12 +35,12 @@ static bool is_interacting = false;
 
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__)) || defined (_WIN32)
 void sigint_handler(int signo) {
-    set_console_color(con_st, CONSOLE_COLOR_DEFAULT);
-    printf("\n"); // this also force flush stdout.
     if (signo == SIGINT) {
         if (!is_interacting) {
             is_interacting=true;
         } else {
+            console_cleanup(con_st);
+            printf("\n");
             llama_print_timings(*g_ctx);
             _exit(130);
         }
@@ -55,10 +59,9 @@ int main(int argc, char ** argv) {
     // save choice to use color for later
     // (note for later: this is a slightly awkward choice)
     con_st.use_color = params.use_color;
-
-#if defined (_WIN32)
-    win32_console_init(params.use_color);
-#endif
+    con_st.multiline_input = params.multiline_input;
+    console_init(con_st);
+    atexit([]() { console_cleanup(con_st); });
 
     if (params.perplexity) {
         printf("\n************\n");
@@ -81,11 +84,13 @@ int main(int argc, char ** argv) {
                 "expect poor results\n", __func__, params.n_ctx);
     }
 
-    if (params.seed <= 0) {
+    fprintf(stderr, "%s: build = %d (%s)\n", __func__, BUILD_NUMBER, BUILD_COMMIT);
+
+    if (params.seed < 0) {
         params.seed = time(NULL);
     }
 
-    fprintf(stderr, "%s: seed = %d\n", __func__, params.seed);
+    fprintf(stderr, "%s: seed  = %d\n", __func__, params.seed);
 
     std::mt19937 rng(params.seed);
     if (params.random_prompt) {
@@ -98,34 +103,11 @@ int main(int argc, char ** argv) {
     llama_context * ctx;
     g_ctx = &ctx;
 
-    // load the model
-    {
-        auto lparams = llama_context_default_params();
-
-        lparams.n_ctx      = params.n_ctx;
-        lparams.n_parts    = params.n_parts;
-        lparams.seed       = params.seed;
-        lparams.f16_kv     = params.memory_f16;
-        lparams.use_mmap   = params.use_mmap;
-        lparams.use_mlock  = params.use_mlock;
-
-        ctx = llama_init_from_file(params.model.c_str(), lparams);
-
-        if (ctx == NULL) {
-            fprintf(stderr, "%s: error: failed to load model '%s'\n", __func__, params.model.c_str());
-            return 1;
-        }
-    }
-
-    if (!params.lora_adapter.empty()) {
-        int err = llama_apply_lora_from_file(ctx,
-                                             params.lora_adapter.c_str(),
-                                             params.lora_base.empty() ? NULL : params.lora_base.c_str(),
-                                             params.n_threads);
-        if (err != 0) {
-            fprintf(stderr, "%s: error: failed to apply lora adapter\n", __func__);
-            return 1;
-        }
+    // load the model and apply lora adapter, if any
+    ctx = llama_init_from_gpt_params(params);
+    if (ctx == NULL) {
+        fprintf(stderr, "%s: error: unable to load model\n", __func__);
+        return 1;
     }
 
     // print system information
@@ -161,23 +143,22 @@ int main(int argc, char ** argv) {
     std::vector<llama_token> session_tokens;
 
     if (!path_session.empty()) {
-        fprintf(stderr, "%s: attempting to load saved session from %s..\n", __func__, path_session.c_str());
+        fprintf(stderr, "%s: attempting to load saved session from '%s'\n", __func__, path_session.c_str());
 
-        // REVIEW - fopen to check for existing session
+        // fopen to check for existing session
         FILE * fp = std::fopen(path_session.c_str(), "rb");
         if (fp != NULL) {
             std::fclose(fp);
 
             session_tokens.resize(params.n_ctx);
             size_t n_token_count_out = 0;
-            const size_t n_session_bytes = llama_load_session_file(ctx, path_session.c_str(), session_tokens.data(), session_tokens.capacity(), &n_token_count_out);
+            if (!llama_load_session_file(ctx, path_session.c_str(), session_tokens.data(), session_tokens.capacity(), &n_token_count_out)) {
+                fprintf(stderr, "%s: error: failed to load session file '%s'\n", __func__, path_session.c_str());
+                return 1;
+            }
             session_tokens.resize(n_token_count_out);
 
-            if (n_session_bytes > 0) {
-                fprintf(stderr, "%s: loaded %zu bytes of session data!\n", __func__, n_session_bytes);
-            } else {
-                fprintf(stderr, "%s: could not load session file, will recreate\n", __func__);
-            }
+            fprintf(stderr, "%s: loaded a session with prompt size of %d tokens\n", __func__, (int) session_tokens.size());
         } else {
             fprintf(stderr, "%s: session file does not exist, will create\n", __func__);
         }
@@ -214,7 +195,7 @@ int main(int argc, char ** argv) {
     }
 
     // number of tokens to keep when resetting context
-    if (params.n_keep < 0 || params.n_keep > (int)embd_inp.size() || params.instruct) {
+    if (params.n_keep < 0 || params.n_keep > (int) embd_inp.size() || params.instruct) {
         params.n_keep = (int)embd_inp.size();
     }
 
@@ -261,7 +242,10 @@ int main(int argc, char ** argv) {
         sigint_action.sa_flags = 0;
         sigaction(SIGINT, &sigint_action, NULL);
 #elif defined (_WIN32)
-        signal(SIGINT, sigint_handler);
+        auto console_ctrl_handler = [](DWORD ctrl_type) -> BOOL {
+            return (ctrl_type == CTRL_C_EVENT) ? (sigint_handler(SIGINT), true) : false;
+        };
+        SetConsoleCtrlHandler(static_cast<PHANDLER_ROUTINE>(console_ctrl_handler), true);
 #endif
 
         fprintf(stderr, "%s: interactive mode on.\n", __func__);
@@ -275,6 +259,10 @@ int main(int argc, char ** argv) {
         if (!params.input_prefix.empty()) {
             fprintf(stderr, "Input prefix: '%s'\n", params.input_prefix.c_str());
         }
+
+        if (!params.input_suffix.empty()) {
+            fprintf(stderr, "Input suffix: '%s'\n", params.input_suffix.c_str());
+        }
     }
     fprintf(stderr, "sampling: repeat_last_n = %d, repeat_penalty = %f, presence_penalty = %f, frequency_penalty = %f, top_k = %d, tfs_z = %f, top_p = %f, typical_p = %f, temp = %f, mirostat = %d, mirostat_lr = %f, mirostat_ent = %f\n",
             params.repeat_last_n, params.repeat_penalty, params.presence_penalty, params.frequency_penalty, params.top_k, params.tfs_z, params.top_p, params.typical_p, params.temp, params.mirostat, params.mirostat_eta, params.mirostat_tau);
@@ -286,17 +274,26 @@ int main(int argc, char ** argv) {
     std::fill(last_n_tokens.begin(), last_n_tokens.end(), 0);
 
     if (params.interactive) {
+        const char *control_message;
+        if (con_st.multiline_input) {
+            control_message = " - To return control to LLaMa, end your input with '\\'.\n"
+                              " - To return control without starting a new line, end your input with '/'.\n";
+        } else {
+            control_message = " - Press Return to return control to LLaMa.\n"
+                              " - To return control without starting a new line, end your input with '/'.\n"
+                              " - If you want to submit another line, end your input with '\\'.\n";
+        }
         fprintf(stderr, "== Running in interactive mode. ==\n"
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__)) || defined (_WIN32)
                " - Press Ctrl+C to interject at any time.\n"
 #endif
-               " - Press Return to return control to LLaMa.\n"
-               " - If you want to submit another line, end your input in '\\'.\n\n");
+               "%s\n", control_message);
+
         is_interacting = params.interactive_first;
     }
 
     bool is_antiprompt = false;
-    bool input_noecho  = false;
+    bool input_echo    = true;
 
     // HACK - because session saving incurs a non-negligible delay, for now skip re-saving session
     // if we loaded a session with at least 75% similarity. It's currently just used to speed up the
@@ -304,13 +301,13 @@ int main(int argc, char ** argv) {
     bool need_to_save_session = !path_session.empty() && n_matching_session_tokens < (embd_inp.size() * 3 / 4);
 
 
-    int n_past     = 0;
-    int n_remain   = params.n_predict;
-    int n_consumed = 0;
+    int n_past             = 0;
+    int n_remain           = params.n_predict;
+    int n_consumed         = 0;
     int n_session_consumed = 0;
 
     // the first thing we will do is to output the prompt, so set color accordingly
-    set_console_color(con_st, CONSOLE_COLOR_PROMPT);
+    console_set_color(con_st, CONSOLE_COLOR_PROMPT);
 
     std::vector<llama_token> embd;
 
@@ -324,12 +321,13 @@ int main(int argc, char ** argv) {
             if (n_past + (int) embd.size() > n_ctx) {
                 const int n_left = n_past - params.n_keep;
 
-                n_past = params.n_keep;
+                // always keep the first token - BOS
+                n_past = std::max(1, params.n_keep);
 
                 // insert n_left/2 tokens at the start of embd from last_n_tokens
                 embd.insert(embd.begin(), last_n_tokens.begin() + n_ctx - n_left/2 - embd.size(), last_n_tokens.end() - embd.size());
 
-                // REVIEW - stop saving session if we run out of context
+                // stop saving session if we run out of context
                 path_session = "";
 
                 //printf("\n---\n");
@@ -342,7 +340,6 @@ int main(int argc, char ** argv) {
             }
 
             // try to reuse a matching prefix from the loaded session instead of re-eval (via n_past)
-            // REVIEW
             if (n_session_consumed < (int) session_tokens.size()) {
                 size_t i = 0;
                 for ( ; i < embd.size(); i++) {
@@ -355,6 +352,7 @@ int main(int argc, char ** argv) {
                     n_session_consumed++;
 
                     if (n_session_consumed >= (int) session_tokens.size()) {
+                        ++i;
                         break;
                     }
                 }
@@ -410,7 +408,7 @@ int main(int argc, char ** argv) {
             llama_token id = 0;
 
             {
-                auto logits = llama_get_logits(ctx);
+                auto logits  = llama_get_logits(ctx);
                 auto n_vocab = llama_n_vocab(ctx);
 
                 // Apply params.logit_bias map
@@ -482,7 +480,7 @@ int main(int argc, char ** argv) {
             embd.push_back(id);
 
             // echo this to console
-            input_noecho = false;
+            input_echo = true;
 
             // decrement remaining sampling budget
             --n_remain;
@@ -500,15 +498,15 @@ int main(int argc, char ** argv) {
         }
 
         // display text
-        if (!input_noecho) {
+        if (input_echo) {
             for (auto id : embd) {
                 printf("%s", llama_token_to_str(ctx, id));
             }
             fflush(stdout);
         }
         // reset color to default if we there is no pending user input
-        if (!input_noecho && (int)embd_inp.size() == n_consumed) {
-            set_console_color(con_st, CONSOLE_COLOR_DEFAULT);
+        if (input_echo && (int)embd_inp.size() == n_consumed) {
+            console_set_color(con_st, CONSOLE_COLOR_DEFAULT);
         }
 
         // in interactive mode, and not currently processing queued inputs;
@@ -528,22 +526,12 @@ int main(int argc, char ** argv) {
                     if (last_output.find(antiprompt.c_str(), last_output.length() - antiprompt.length(), antiprompt.length()) != std::string::npos) {
                         is_interacting = true;
                         is_antiprompt = true;
-                        set_console_color(con_st, CONSOLE_COLOR_USER_INPUT);
-                        fflush(stdout);
                         break;
                     }
                 }
             }
 
             if (n_past > 0 && is_interacting) {
-                // potentially set color to indicate we are taking user input
-                set_console_color(con_st, CONSOLE_COLOR_USER_INPUT);
-
-#if defined (_WIN32)
-                // Windows: must reactivate sigint handler after each signal
-                signal(SIGINT, sigint_handler);
-#endif
-
                 if (params.instruct) {
                     printf("\n> ");
                 }
@@ -557,33 +545,21 @@ int main(int argc, char ** argv) {
                 std::string line;
                 bool another_line = true;
                 do {
-#if defined(_WIN32)
-                    std::wstring wline;
-                    if (!std::getline(std::wcin, wline)) {
-                        // input stream is bad or EOF received
-                        return 0;
-                    }
-                    win32_utf8_encode(wline, line);
-#else
-                    if (!std::getline(std::cin, line)) {
-                        // input stream is bad or EOF received
-                        return 0;
-                    }
-#endif
-                    if (line.empty() || line.back() != '\\') {
-                        another_line = false;
-                    } else {
-                        line.pop_back(); // Remove the continue character
-                    }
-                    buffer += line + '\n'; // Append the line to the result
+                    another_line = console_readline(con_st, line);
+                    buffer += line;
                 } while (another_line);
 
                 // done taking input, reset color
-                set_console_color(con_st, CONSOLE_COLOR_DEFAULT);
+                console_set_color(con_st, CONSOLE_COLOR_DEFAULT);
 
                 // Add tokens to embd only if the input buffer is non-empty
                 // Entering a empty line lets the user pass control back
                 if (buffer.length() > 1) {
+                    // append input suffix if any
+                    if (!params.input_suffix.empty()) {
+                        buffer += params.input_suffix;
+                        printf("%s", params.input_suffix.c_str());
+                    }
 
                     // instruct mode: insert instruction prefix
                     if (params.instruct && !is_antiprompt) {
@@ -602,7 +578,7 @@ int main(int argc, char ** argv) {
                     n_remain -= line_inp.size();
                 }
 
-                input_noecho = true; // do not echo this again
+                input_echo = false; // do not echo this again
             }
 
             if (n_past > 0) {
@@ -627,14 +603,8 @@ int main(int argc, char ** argv) {
         }
     }
 
-#if defined (_WIN32)
-    signal(SIGINT, SIG_DFL);
-#endif
-
     llama_print_timings(ctx);
     llama_free(ctx);
-
-    set_console_color(con_st, CONSOLE_COLOR_DEFAULT);
 
     return 0;
 }
