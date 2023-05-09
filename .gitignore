@@ -28,6 +28,8 @@ models/*
 /quantize
 /quantize-gptneox
 /quantize-stats
+/update-llama
+/update-gptneox
 /result
 /perplexity
 /embedding
