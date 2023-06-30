@@ -1,5 +1,4 @@
 # Define the default target now so that it is always the first target
-
 BUILD_TARGETS = main main-gptneox main-oasst main-rwkv quantize quantize-gptneox quantize-rwkv quantize-stats update-llama update-gptneox update-rwkv perplexity embedding vdot train-text-from-scratch simple libembdinput.so embd-input-test
 
 ifdef LLAMA_BUILD_SERVER

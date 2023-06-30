@@ -800,7 +800,7 @@ extern "C" {
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
             struct ggml_tensor  * b);
-
+    
     // Ext functions (for rwkv)
     GGML_API struct ggml_tensor * ggml_ext_max(
             struct ggml_context * ctx,
