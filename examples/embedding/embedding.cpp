@@ -4,9 +4,12 @@
 
 #include <ctime>
 
+#if defined(_MSC_VER)
+#pragma warning(disable: 4244 4267) // possible loss of data
+#endif
+
 int main(int argc, char ** argv) {
     gpt_params params;
-    params.model = "models/llama-7B/ggml-model.bin";
 
     if (gpt_params_parse(argc, argv, params) == false) {
         return 1;
@@ -21,22 +24,25 @@ int main(int argc, char ** argv) {
 
     fprintf(stderr, "%s: build = %d (%s)\n", __func__, BUILD_NUMBER, BUILD_COMMIT);
 
-    if (params.seed < 0) {
+    if (params.seed == LLAMA_DEFAULT_SEED) {
         params.seed = time(NULL);
     }
 
-    fprintf(stderr, "%s: seed  = %d\n", __func__, params.seed);
+    fprintf(stderr, "%s: seed  = %u\n", __func__, params.seed);
 
     std::mt19937 rng(params.seed);
     if (params.random_prompt) {
         params.prompt = gpt_random_prompt(rng);
     }
 
+    llama_init_backend(params.numa);
+
+    llama_model * model;
     llama_context * ctx;
 
     // load the model
-    ctx = llama_init_from_gpt_params(params);
-    if (ctx == NULL) {
+    std::tie(model, ctx) = llama_init_from_gpt_params(params);
+    if (model == NULL) {
         fprintf(stderr, "%s: error: unable to load model\n", __func__);
         return 1;
     }
@@ -55,9 +61,6 @@ int main(int argc, char ** argv) {
 
     // tokenize the prompt
     auto embd_inp = ::llama_tokenize(ctx, params.prompt, true);
-
-    // determine newline token
-    auto llama_token_newline = ::llama_tokenize(ctx, "\n", false);
 
     if (params.verbose_prompt) {
         fprintf(stderr, "\n");
@@ -88,6 +91,7 @@ int main(int argc, char ** argv) {
 
     llama_print_timings(ctx);
     llama_free(ctx);
+    llama_free_model(model);
 
     return 0;
 }

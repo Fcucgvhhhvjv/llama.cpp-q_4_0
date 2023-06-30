@@ -8,6 +8,8 @@
 #include <iterator>
 #include <algorithm>
 #include <sstream>
+#include <unordered_set>
+#include <regex>
 
 #if defined(__APPLE__) && defined(__MACH__)
 #include <sys/types.h>
@@ -26,23 +28,27 @@
 #include <wchar.h>
 #endif
 
+#if defined(_MSC_VER)
+#pragma warning(disable: 4244 4267) // possible loss of data
+#endif
+
 int32_t get_num_physical_cores() {
 #ifdef __linux__
-    std::ifstream cpuinfo("/proc/cpuinfo");
-    std::string line;
-    while (std::getline(cpuinfo, line)) {
-        std::size_t pos = line.find("cpu cores");
-        if (pos != std::string::npos) {
-            pos = line.find(": ", pos);
-            if (pos != std::string::npos) {
-                try {
-                    // Extract the number and return it
-                    return static_cast<int32_t>(std::stoul(line.substr(pos + 2)));
-                } catch (const std::invalid_argument &) {
-                    // Ignore if we could not parse
-                }
-            }
+    // enumerate the set of thread siblings, num entries is num cores
+    std::unordered_set<std::string> siblings;
+    for (uint32_t cpu=0; cpu < UINT32_MAX; ++cpu) {
+        std::ifstream thread_siblings("/sys/devices/system/cpu"
+            + std::to_string(cpu) + "/topology/thread_siblings");
+        if (!thread_siblings.is_open()) {
+            break; // no more cpus
         }
+        std::string line;
+        if (std::getline(thread_siblings, line)) {
+            siblings.insert(line);
+        }
+    }
+    if (siblings.size() > 0) {
+        return static_cast<int32_t>(siblings.size());
     }
 #elif defined(__APPLE__) && defined(__MACH__)
     int32_t num_physical_cores;
@@ -91,19 +97,20 @@ bool gpt_params_parse(int argc, char ** argv, gpt_params & params) {
     bool escape_prompt = false;
     std::string arg;
     gpt_params default_params;
+    const std::string arg_prefix = "--";
 
     for (int i = 1; i < argc; i++) {
         arg = argv[i];
+        if (arg.compare(0, arg_prefix.size(), arg_prefix) == 0) {
+            std::replace(arg.begin(), arg.end(), '_', '-');
+        }
 
         if (arg == "-s" || arg == "--seed") {
-#if defined(GGML_USE_CUBLAS)
-            fprintf(stderr, "WARNING: when using cuBLAS generation results are NOT guaranteed to be reproducible.\n");
-#endif
             if (++i >= argc) {
                 invalid_param = true;
                 break;
             }
-            params.seed = std::stoi(argv[i]);
+            params.seed = std::stoul(argv[i]);
         } else if (arg == "-t" || arg == "--threads") {
             if (++i >= argc) {
                 invalid_param = true;
@@ -126,6 +133,8 @@ bool gpt_params_parse(int argc, char ** argv, gpt_params & params) {
             params.path_prompt_cache = argv[i];
         } else if (arg == "--prompt-cache-all") {
             params.prompt_cache_all = true;
+        } else if (arg == "--prompt-cache-ro") {
+            params.prompt_cache_ro = true;
         } else if (arg == "-f" || arg == "--file") {
             if (++i >= argc) {
                 invalid_param = true;
@@ -141,27 +150,27 @@ bool gpt_params_parse(int argc, char ** argv, gpt_params & params) {
             if (params.prompt.back() == '\n') {
                 params.prompt.pop_back();
             }
-        } else if (arg == "-n" || arg == "--n_predict") {
+        } else if (arg == "-n" || arg == "--n-predict") {
             if (++i >= argc) {
                 invalid_param = true;
                 break;
             }
             params.n_predict = std::stoi(argv[i]);
-        } else if (arg == "--top_k") {
+        } else if (arg == "--top-k") {
             if (++i >= argc) {
                 invalid_param = true;
                 break;
             }
             params.top_k = std::stoi(argv[i]);
-        } else if (arg == "-c" || arg == "--ctx_size") {
+        } else if (arg == "-c" || arg == "--ctx-size") {
             if (++i >= argc) {
                 invalid_param = true;
                 break;
             }
             params.n_ctx = std::stoi(argv[i]);
-        } else if (arg == "--memory_f32") {
+        } else if (arg == "--memory-f32") {
             params.memory_f16 = false;
-        } else if (arg == "--top_p") {
+        } else if (arg == "--top-p") {
             if (++i >= argc) {
                 invalid_param = true;
                 break;
@@ -185,25 +194,25 @@ bool gpt_params_parse(int argc, char ** argv, gpt_params & params) {
                 break;
             }
             params.typical_p = std::stof(argv[i]);
-        } else if (arg == "--repeat_last_n") {
+        } else if (arg == "--repeat-last-n") {
             if (++i >= argc) {
                 invalid_param = true;
                 break;
             }
             params.repeat_last_n = std::stoi(argv[i]);
-        } else if (arg == "--repeat_penalty") {
+        } else if (arg == "--repeat-penalty") {
             if (++i >= argc) {
                 invalid_param = true;
                 break;
             }
             params.repeat_penalty = std::stof(argv[i]);
-        } else if (arg == "--frequency_penalty") {
+        } else if (arg == "--frequency-penalty") {
             if (++i >= argc) {
                 invalid_param = true;
                 break;
             }
             params.frequency_penalty = std::stof(argv[i]);
-        } else if (arg == "--presence_penalty") {
+        } else if (arg == "--presence-penalty") {
             if (++i >= argc) {
                 invalid_param = true;
                 break;
@@ -215,19 +224,19 @@ bool gpt_params_parse(int argc, char ** argv, gpt_params & params) {
                 break;
             }
             params.mirostat = std::stoi(argv[i]);
-        } else if (arg == "--mirostat_lr") {
+        } else if (arg == "--mirostat-lr") {
             if (++i >= argc) {
                 invalid_param = true;
                 break;
             }
             params.mirostat_eta = std::stof(argv[i]);
-        } else if (arg == "--mirostat_ent") {
+        } else if (arg == "--mirostat-ent") {
             if (++i >= argc) {
                 invalid_param = true;
                 break;
             }
             params.mirostat_tau = std::stof(argv[i]);
-        } else if (arg == "-b" || arg == "--batch_size") {
+        } else if (arg == "-b" || arg == "--batch-size") {
             if (++i >= argc) {
                 invalid_param = true;
                 break;
@@ -246,6 +255,12 @@ bool gpt_params_parse(int argc, char ** argv, gpt_params & params) {
                 break;
             }
             params.model = argv[i];
+        } else if (arg == "-a" || arg == "--alias") {
+            if (++i >= argc) {
+                invalid_param = true;
+                break;
+            }
+            params.model_alias = argv[i];
         } else if (arg == "--lora") {
             if (++i >= argc) {
                 invalid_param = true;
@@ -273,10 +288,65 @@ bool gpt_params_parse(int argc, char ** argv, gpt_params & params) {
             params.use_color = true;
         } else if (arg == "--mlock") {
             params.use_mlock = true;
+        } else if (arg == "--gpu-layers" || arg == "-ngl" || arg == "--n-gpu-layers") {
+            if (++i >= argc) {
+                invalid_param = true;
+                break;
+            }
+#ifdef LLAMA_SUPPORTS_GPU_OFFLOAD
+            params.n_gpu_layers = std::stoi(argv[i]);
+#else
+            fprintf(stderr, "warning: not compiled with GPU offload support, --n-gpu-layers option will be ignored\n");
+            fprintf(stderr, "warning: see main README.md for information on enabling GPU BLAS support\n");
+#endif
+        } else if (arg == "--main-gpu" || arg == "-mg") {
+            if (++i >= argc) {
+                invalid_param = true;
+                break;
+            }
+#ifdef GGML_USE_CUBLAS
+            params.main_gpu = std::stoi(argv[i]);
+#else
+      fprintf(stderr, "warning: llama.cpp was compiled without cuBLAS. It is not possible to set a main GPU.\n");
+#endif
+        } else if (arg == "--tensor-split" || arg == "-ts") {
+            if (++i >= argc) {
+                invalid_param = true;
+                break;
+            }
+#ifdef GGML_USE_CUBLAS
+            std::string arg_next = argv[i];
+
+            // split string by , and /
+            const std::regex regex{R"([,/]+)"};
+            std::sregex_token_iterator it{arg_next.begin(), arg_next.end(), regex, -1};
+            std::vector<std::string> split_arg{it, {}};
+            GGML_ASSERT(split_arg.size() <= LLAMA_MAX_DEVICES);
+
+            for (size_t i = 0; i < LLAMA_MAX_DEVICES; ++i) {
+                if (i < split_arg.size()) {
+                    params.tensor_split[i] = std::stof(split_arg[i]);
+                } else {
+                    params.tensor_split[i] = 0.0f;
+                }
+            }
+#else
+      fprintf(stderr, "warning: llama.cpp was compiled without cuBLAS. It is not possible to set a tensor split.\n");
+#endif // GGML_USE_CUBLAS
+        } else if (arg == "--low-vram" || arg == "-lv") {
+#ifdef GGML_USE_CUBLAS
+            params.low_vram = true;
+#else
+      fprintf(stderr, "warning: llama.cpp was compiled without cuBLAS. It is not possible to set lower vram usage.\n");
+#endif // GGML_USE_CUBLAS
         } else if (arg == "--no-mmap") {
             params.use_mmap = false;
         } else if (arg == "--mtest") {
             params.mem_test = true;
+        } else if (arg == "--numa") {
+            params.numa = true;
+        } else if (arg == "--export") {
+            params.export_cgraph = true;
         } else if (arg == "--verbose-prompt") {
             params.verbose_prompt = true;
         } else if (arg == "-r" || arg == "--reverse-prompt") {
@@ -306,16 +376,10 @@ bool gpt_params_parse(int argc, char ** argv, gpt_params & params) {
                 } else {
                     throw std::exception();
                 }
-            } catch (const std::exception &e) {
+            } catch (const std::exception&) {
                 invalid_param = true;
                 break;
             }
-        } else if (arg == "--n_parts") {
-            if (++i >= argc) {
-                invalid_param = true;
-                break;
-            }
-            params.n_parts = std::stoi(argv[i]);
         } else if (arg == "-h" || arg == "--help") {
             gpt_print_usage(argc, argv, default_params);
             exit(0);
@@ -346,11 +410,12 @@ bool gpt_params_parse(int argc, char ** argv, gpt_params & params) {
     }
     if (params.prompt_cache_all &&
             (params.interactive || params.interactive_first ||
-             params.instruct || params.antiprompt.size())) {
+             params.instruct)) {
         fprintf(stderr, "error: --prompt-cache-all not supported in interactive mode yet\n");
         gpt_print_usage(argc, argv, default_params);
         exit(1);
     }
+
     if (escape_prompt) {
         process_escapes(params.prompt);
     }
@@ -368,8 +433,8 @@ void gpt_print_usage(int /*argc*/, char ** argv, const gpt_params & params) {
     fprintf(stderr, "  -ins, --instruct      run in instruction mode (use with Alpaca models)\n");
     fprintf(stderr, "  --multiline-input     allows you to write or paste multiple lines without ending each in '\\'\n");
     fprintf(stderr, "  -r PROMPT, --reverse-prompt PROMPT\n");
-    fprintf(stderr, "                        run in interactive mode and poll user input upon seeing PROMPT (can be\n");
-    fprintf(stderr, "                        specified more than once for multiple prompts).\n");
+    fprintf(stderr, "                        halt generation at PROMPT, return control in interactive mode\n");
+    fprintf(stderr, "                        (can be specified more than once for multiple prompts).\n");
     fprintf(stderr, "  --color               colorise output to distinguish prompt and user input from generations\n");
     fprintf(stderr, "  -s SEED, --seed SEED  RNG seed (default: -1, use random seed for < 0)\n");
     fprintf(stderr, "  -t N, --threads N     number of threads to use during computation (default: %d)\n", params.n_threads);
@@ -379,36 +444,37 @@ void gpt_print_usage(int /*argc*/, char ** argv, const gpt_params & params) {
     fprintf(stderr, "  --prompt-cache FNAME  file to cache prompt state for faster startup (default: none)\n");
     fprintf(stderr, "  --prompt-cache-all    if specified, saves user input and generations to cache as well.\n");
     fprintf(stderr, "                        not supported with --interactive or other interactive options\n");
+    fprintf(stderr, "  --prompt-cache-ro     if specified, uses the prompt cache but does not update it.\n");
     fprintf(stderr, "  --random-prompt       start with a randomized prompt.\n");
     fprintf(stderr, "  --in-prefix STRING    string to prefix user inputs with (default: empty)\n");
     fprintf(stderr, "  --in-suffix STRING    string to suffix after user inputs with (default: empty)\n");
     fprintf(stderr, "  -f FNAME, --file FNAME\n");
     fprintf(stderr, "                        prompt file to start generation.\n");
-    fprintf(stderr, "  -n N, --n_predict N   number of tokens to predict (default: %d, -1 = infinity)\n", params.n_predict);
-    fprintf(stderr, "  --top_k N             top-k sampling (default: %d, 0 = disabled)\n", params.top_k);
-    fprintf(stderr, "  --top_p N             top-p sampling (default: %.1f, 1.0 = disabled)\n", (double)params.top_p);
+    fprintf(stderr, "  -n N, --n-predict N   number of tokens to predict (default: %d, -1 = infinity)\n", params.n_predict);
+    fprintf(stderr, "  --top-k N             top-k sampling (default: %d, 0 = disabled)\n", params.top_k);
+    fprintf(stderr, "  --top-p N             top-p sampling (default: %.1f, 1.0 = disabled)\n", (double)params.top_p);
     fprintf(stderr, "  --tfs N               tail free sampling, parameter z (default: %.1f, 1.0 = disabled)\n", (double)params.tfs_z);
     fprintf(stderr, "  --typical N           locally typical sampling, parameter p (default: %.1f, 1.0 = disabled)\n", (double)params.typical_p);
-    fprintf(stderr, "  --repeat_last_n N     last n tokens to consider for penalize (default: %d, 0 = disabled, -1 = ctx_size)\n", params.repeat_last_n);
-    fprintf(stderr, "  --repeat_penalty N    penalize repeat sequence of tokens (default: %.1f, 1.0 = disabled)\n", (double)params.repeat_penalty);
-    fprintf(stderr, "  --presence_penalty N  repeat alpha presence penalty (default: %.1f, 0.0 = disabled)\n", (double)params.presence_penalty);
-    fprintf(stderr, "  --frequency_penalty N repeat alpha frequency penalty (default: %.1f, 0.0 = disabled)\n", (double)params.frequency_penalty);
+    fprintf(stderr, "  --repeat-last-n N     last n tokens to consider for penalize (default: %d, 0 = disabled, -1 = ctx_size)\n", params.repeat_last_n);
+    fprintf(stderr, "  --repeat-penalty N    penalize repeat sequence of tokens (default: %.1f, 1.0 = disabled)\n", (double)params.repeat_penalty);
+    fprintf(stderr, "  --presence-penalty N  repeat alpha presence penalty (default: %.1f, 0.0 = disabled)\n", (double)params.presence_penalty);
+    fprintf(stderr, "  --frequency-penalty N repeat alpha frequency penalty (default: %.1f, 0.0 = disabled)\n", (double)params.frequency_penalty);
     fprintf(stderr, "  --mirostat N          use Mirostat sampling.\n");
     fprintf(stderr, "                        Top K, Nucleus, Tail Free and Locally Typical samplers are ignored if used.\n");
     fprintf(stderr, "                        (default: %d, 0 = disabled, 1 = Mirostat, 2 = Mirostat 2.0)\n", params.mirostat);
-    fprintf(stderr, "  --mirostat_lr N       Mirostat learning rate, parameter eta (default: %.1f)\n", (double)params.mirostat_eta);
-    fprintf(stderr, "  --mirostat_ent N      Mirostat target entropy, parameter tau (default: %.1f)\n", (double)params.mirostat_tau);
+    fprintf(stderr, "  --mirostat-lr N       Mirostat learning rate, parameter eta (default: %.1f)\n", (double)params.mirostat_eta);
+    fprintf(stderr, "  --mirostat-ent N      Mirostat target entropy, parameter tau (default: %.1f)\n", (double)params.mirostat_tau);
     fprintf(stderr, "  -l TOKEN_ID(+/-)BIAS, --logit-bias TOKEN_ID(+/-)BIAS\n");
     fprintf(stderr, "                        modifies the likelihood of token appearing in the completion,\n");
     fprintf(stderr, "                        i.e. `--logit-bias 15043+1` to increase likelihood of token ' Hello',\n");
     fprintf(stderr, "                        or `--logit-bias 15043-1` to decrease likelihood of token ' Hello'\n");
-    fprintf(stderr, "  -c N, --ctx_size N    size of the prompt context (default: %d)\n", params.n_ctx);
+    fprintf(stderr, "  -c N, --ctx-size N    size of the prompt context (default: %d)\n", params.n_ctx);
     fprintf(stderr, "  --ignore-eos          ignore end of stream token and continue generating (implies --logit-bias 2-inf)\n");
     fprintf(stderr, "  --no-penalize-nl      do not penalize newline token\n");
-    fprintf(stderr, "  --memory_f32          use f32 instead of f16 for memory key+value\n");
+    fprintf(stderr, "  --memory-f32          use f32 instead of f16 for memory key+value (default: disabled)\n");
+    fprintf(stderr, "                        not recommended: doubles context memory required and no measurable increase in quality\n");
     fprintf(stderr, "  --temp N              temperature (default: %.1f)\n", (double)params.temp);
-    fprintf(stderr, "  --n_parts N           number of model parts (default: -1 = determine from dimensions)\n");
-    fprintf(stderr, "  -b N, --batch_size N  batch size for prompt processing (default: %d)\n", params.n_batch);
+    fprintf(stderr, "  -b N, --batch-size N  batch size for prompt processing (default: %d)\n", params.n_batch);
     fprintf(stderr, "  --perplexity          compute perplexity over the prompt\n");
     fprintf(stderr, "  --keep                number of tokens to keep from the initial prompt (default: %d, -1 = all)\n", params.n_keep);
     if (llama_mlock_supported()) {
@@ -417,7 +483,19 @@ void gpt_print_usage(int /*argc*/, char ** argv, const gpt_params & params) {
     if (llama_mmap_supported()) {
         fprintf(stderr, "  --no-mmap             do not memory-map model (slower load but may reduce pageouts if not using mlock)\n");
     }
+    fprintf(stderr, "  --numa                attempt optimizations that help on some NUMA systems\n");
+    fprintf(stderr, "                        if run without this previously, it is recommended to drop the system page cache before using this\n");
+    fprintf(stderr, "                        see https://github.com/ggerganov/llama.cpp/issues/1437\n");
+#ifdef LLAMA_SUPPORTS_GPU_OFFLOAD
+    fprintf(stderr, "  -ngl N, --n-gpu-layers N\n");
+    fprintf(stderr, "                        number of layers to store in VRAM\n");
+    fprintf(stderr, "  -ts SPLIT --tensor-split SPLIT\n");
+    fprintf(stderr, "                        how to split tensors across multiple GPUs, comma-separated list of proportions, e.g. 3,1\n");
+    fprintf(stderr, "  -mg i, --main-gpu i   the GPU to use for scratch and small tensors\n" );
+    fprintf(stderr, "  -lv, --low-vram       don't allocate VRAM scratch buffer\n" );
+#endif
     fprintf(stderr, "  --mtest               compute maximum memory usage\n");
+    fprintf(stderr, "  --export              export the computation graph to 'llama.ggml'\n");
     fprintf(stderr, "  --verbose-prompt      print prompt before generation\n");
     fprintf(stderr, "  --lora FNAME          apply LoRA adapter (implies --no-mmap)\n");
     fprintf(stderr, "  --lora-base FNAME     optional model to use as a base for the layers modified by the LoRA adapter\n");
@@ -456,37 +534,49 @@ std::vector<llama_token> llama_tokenize(struct llama_context * ctx, const std::s
     return res;
 }
 
-struct llama_context * llama_init_from_gpt_params(const gpt_params & params) {
+std::tuple<struct llama_model *, struct llama_context *> llama_init_from_gpt_params(const gpt_params & params) {
     auto lparams = llama_context_default_params();
 
-    lparams.n_ctx      = params.n_ctx;
-    lparams.n_parts    = params.n_parts;
-    lparams.seed       = params.seed;
-    lparams.f16_kv     = params.memory_f16;
-    lparams.use_mmap   = params.use_mmap;
-    lparams.use_mlock  = params.use_mlock;
-    lparams.logits_all = params.perplexity;
-    lparams.embedding  = params.embedding;
+    lparams.n_ctx        = params.n_ctx;
+    lparams.n_batch      = params.n_batch;
+    lparams.n_gpu_layers = params.n_gpu_layers;
+    lparams.main_gpu     = params.main_gpu;
+    memcpy(lparams.tensor_split, params.tensor_split, LLAMA_MAX_DEVICES*sizeof(float));
+    lparams.low_vram     = params.low_vram;
+    lparams.seed         = params.seed;
+    lparams.f16_kv       = params.memory_f16;
+    lparams.use_mmap     = params.use_mmap;
+    lparams.use_mlock    = params.use_mlock;
+    lparams.logits_all   = params.perplexity;
+    lparams.embedding    = params.embedding;
 
-    llama_context * lctx = llama_init_from_file(params.model.c_str(), lparams);
-
-    if (lctx == NULL) {
+    llama_model * model  = llama_load_model_from_file(params.model.c_str(), lparams);
+    if (model == NULL) {
         fprintf(stderr, "%s: error: failed to load model '%s'\n", __func__, params.model.c_str());
-        return NULL;
+        return std::make_tuple(nullptr, nullptr);
+    }
+
+    llama_context * lctx = llama_new_context_with_model(model, lparams);
+    if (lctx == NULL) {
+        fprintf(stderr, "%s: error: failed to create context with model '%s'\n", __func__, params.model.c_str());
+        llama_free_model(model);
+        return std::make_tuple(nullptr, nullptr);
     }
 
     if (!params.lora_adapter.empty()) {
-        int err = llama_apply_lora_from_file(lctx,
+        int err = llama_model_apply_lora_from_file(model,
                                              params.lora_adapter.c_str(),
                                              params.lora_base.empty() ? NULL : params.lora_base.c_str(),
                                              params.n_threads);
         if (err != 0) {
             fprintf(stderr, "%s: error: failed to apply lora adapter\n", __func__);
-            return NULL;
+            llama_free(lctx);
+            llama_free_model(model);
+            return std::make_tuple(nullptr, nullptr);
         }
     }
 
-    return lctx;
+    return std::make_tuple(model, lctx);
 }
 
 void console_init(console_state & con_st) {
@@ -565,6 +655,9 @@ void console_set_color(console_state & con_st, console_color_t color) {
             case CONSOLE_COLOR_USER_INPUT:
                 fprintf(con_st.out, ANSI_BOLD ANSI_COLOR_GREEN);
                 break;
+            case CONSOLE_COLOR_ERROR:
+                fprintf(con_st.out, ANSI_BOLD ANSI_COLOR_RED);
+                break;
         }
         con_st.color = color;
         fflush(con_st.out);
@@ -572,6 +665,37 @@ void console_set_color(console_state & con_st, console_color_t color) {
 }
 
 char32_t getchar32() {
+#if defined(_WIN32)
+    HANDLE hConsole = GetStdHandle(STD_INPUT_HANDLE);
+    wchar_t high_surrogate = 0;
+
+    while (true) {
+        INPUT_RECORD record;
+        DWORD count;
+        if (!ReadConsoleInputW(hConsole, &record, 1, &count) || count == 0) {
+            return WEOF;
+        }
+
+        if (record.EventType == KEY_EVENT && record.Event.KeyEvent.bKeyDown) {
+            wchar_t wc = record.Event.KeyEvent.uChar.UnicodeChar;
+            if (wc == 0) {
+                continue;
+            }
+
+            if ((wc >= 0xD800) && (wc <= 0xDBFF)) { // Check if wc is a high surrogate
+                high_surrogate = wc;
+                continue;
+            } else if ((wc >= 0xDC00) && (wc <= 0xDFFF)) { // Check if wc is a low surrogate
+                if (high_surrogate != 0) { // Check if we have a high surrogate
+                    return ((high_surrogate - 0xD800) << 10) + (wc - 0xDC00) + 0x10000;
+                }
+            }
+
+            high_surrogate = 0; // Reset the high surrogate
+            return static_cast<char32_t>(wc);
+        }
+    }
+#else
     wchar_t wc = getwchar();
     if (static_cast<wint_t>(wc) == WEOF) {
         return WEOF;
@@ -590,6 +714,7 @@ char32_t getchar32() {
 #endif
 
     return static_cast<char32_t>(wc);
+#endif
 }
 
 void pop_cursor(console_state & con_st) {
@@ -743,7 +868,7 @@ bool console_readline(console_state & con_st, std::string & line) {
             break;
         }
 
-        if (input_char == WEOF || input_char == 0x04 /* Ctrl+D*/) {
+        if (input_char == (char32_t) WEOF || input_char == 0x04 /* Ctrl+D*/) {
             end_of_stream = true;
             break;
         }
@@ -758,7 +883,7 @@ bool console_readline(console_state & con_st, std::string & line) {
             char32_t code = getchar32();
             if (code == '[' || code == 0x1B) {
                 // Discard the rest of the escape sequence
-                while ((code = getchar32()) != WEOF) {
+                while ((code = getchar32()) != (char32_t) WEOF) {
                     if ((code >= 'A' && code <= 'Z') || (code >= 'a' && code <= 'z') || code == '~') {
                         break;
                     }

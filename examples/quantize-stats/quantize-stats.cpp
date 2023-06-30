@@ -19,6 +19,10 @@
 #include <thread>
 #include <mutex>
 
+#if defined(_MSC_VER)
+#pragma warning(disable: 4244 4267) // possible loss of data
+#endif
+
 struct quantize_stats_params {
     std::string model = "models/7B/ggml-model-f16.bin";
     bool verbose = false;
@@ -282,8 +286,9 @@ int main(int argc, char ** argv) {
                 break;
             }
             int j;
-            for (j = 0; j < GGML_TYPE_COUNT && strcmp(argv[i], ggml_type_name((ggml_type) j)) != 0; j++) {
-                // find match
+            for (j = 0; j < GGML_TYPE_COUNT; ++j) {
+               const auto * name = ggml_type_name((ggml_type) j);
+               if (name && strcmp(argv[i], name) == 0) break;
             }
             if (j < GGML_TYPE_COUNT) {
                 params.include_types.push_back((ggml_type) j);
@@ -315,21 +320,29 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "Loading model\n");
 
     const int64_t t_main_start_us = ggml_time_us();
+    llama_model * model;
     llama_context * ctx;
 
     {
         auto lparams = llama_context_default_params();
 
         lparams.n_ctx      = 256;
-        lparams.n_parts    = 1;
         lparams.seed       = 1;
         lparams.f16_kv     = false;
         lparams.use_mlock  = false;
 
-        ctx = llama_init_from_file(params.model.c_str(), lparams);
+        model = llama_load_model_from_file(params.model.c_str(), lparams);
+
+        if (model == NULL) {
+            fprintf(stderr, "%s: error: failed to load model '%s'\n", __func__, params.model.c_str());
+            return 1;
+        }
+
+        ctx = llama_new_context_with_model(model, lparams);
 
         if (ctx == NULL) {
-            fprintf(stderr, "%s: error: failed to load model '%s'\n", __func__, params.model.c_str());
+            fprintf(stderr, "%s: error: failed to create context with model '%s'\n", __func__, params.model.c_str());
+            llama_free_model(model);
             return 1;
         }
     }
@@ -353,6 +366,7 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "%s: error: Quantization should be tested with a float model, "
                 "this model contains already quantized layers (%s is type %d)\n", __func__, kv_tensor.first.c_str(), kv_tensor.second->type);
             llama_free(ctx);
+            llama_free_model(model);
             return 1;
         }
         included_layers++;
@@ -411,6 +425,7 @@ int main(int argc, char ** argv) {
 
 
     llama_free(ctx);
+    llama_free_model(model);
     // report timing
     {
         const int64_t t_main_end_us = ggml_time_us();

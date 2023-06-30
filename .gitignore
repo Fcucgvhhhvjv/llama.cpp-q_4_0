@@ -1,5 +1,6 @@
 *.o
 *.a
+*.so
 .DS_Store
 .build/
 .cache/
@@ -7,6 +8,7 @@
 .envrc
 .swiftpm
 .venv
+.clang-tidy
 .vs/
 .vscode/
 
@@ -16,9 +18,12 @@ build-debug/
 build-release/
 build-static/
 build-cublas/
+build-opencl/
+build-metal/
 build-no-accel/
 build-sanitize-addr/
 build-sanitize-thread/
+out/
 
 models/*
 *.bin
@@ -37,13 +42,18 @@ models/*
 /result
 /perplexity
 /embedding
+/train-text-from-scratch
+/simple
 /benchmark-matmult
 /vdot
+/server
 /Pipfile
-
+/embd-input-test
+/libllama.so
 build-info.h
 arm_neon.h
 compile_commands.json
+CMakeSettings.json
 
 __pycache__
 
@@ -52,5 +62,6 @@ zig-cache/
 
 ppl-*.txt
 qnt-*.txt
+perf-*.txt
 
 examples/jeopardy/results.txt
