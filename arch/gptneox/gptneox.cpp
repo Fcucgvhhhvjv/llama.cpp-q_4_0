@@ -502,7 +502,6 @@ struct gptneox_file_loader {
                 case GGML_TYPE_F16:
                 case GGML_TYPE_Q4_0:
                 case GGML_TYPE_Q4_1:
-                case GGML_TYPE_Q4_2:
                 case GGML_TYPE_Q5_0:
                 case GGML_TYPE_Q5_1:
                 case GGML_TYPE_Q8_0:
@@ -579,7 +578,6 @@ struct gptneox_file_saver {
             case GGML_TYPE_F16:
             case GGML_TYPE_Q4_0:
             case GGML_TYPE_Q4_1:
-            case GGML_TYPE_Q4_2:
             case GGML_TYPE_Q5_0:
             case GGML_TYPE_Q5_1:
             case GGML_TYPE_Q8_0:
@@ -608,7 +606,7 @@ struct gptneox_model_loader {
     gptneox_model_loader(const std::string & fname_base, bool use_mmap, bool vocab_only) {
         auto first_file = new gptneox_file_loader(fname_base.c_str(), 0, tensors_map);
         file_loaders.emplace_back(first_file);
-        uint32_t n_parts = vocab_only ? 1 : guess_n_parts();
+        uint32_t n_parts = 1;
         for (uint32_t i = 1; i < n_parts; i++) {
             std::string fname = fname_base + "." + std::to_string(i);
             auto ith_file = new gptneox_file_loader(fname.c_str(), i, tensors_map);
@@ -639,15 +637,6 @@ struct gptneox_model_loader {
             }
         }
         return false;
-    }
-
-    uint32_t guess_n_parts() const {
-        auto it = tensors_map.name_to_idx.find("gpt_neox.embed_in.weight");
-        if (it == tensors_map.name_to_idx.end()) {
-            throw std::string("missing gpt_neox.embed_in.weight");
-        }
-        const gptneox_load_tensor & lt = tensors_map.tensors.at(it->second);
-        return file_loaders.at(0)->hparams.n_embd / lt.shards.at(0).ne.at(0);
     }
 
     void calc_sizes(size_t * ctx_size_p, size_t * mmapped_size_p) const {
@@ -831,9 +820,9 @@ static bool kv_cache_init(
 
 struct gptneox_context_params gptneox_context_default_params() {
     struct gptneox_context_params result = {
+        /*.seed                        =*/ DEFAULT_SEED,
         /*.n_ctx                       =*/ 512,
-        /*.n_parts                     =*/ -1,
-        /*.seed                        =*/ 0,
+        /*.n_batch                     =*/ 512,
         /*.f16_kv                      =*/ false,
         /*.logits_all                  =*/ false,
         /*.vocab_only                  =*/ false,
@@ -1224,7 +1213,7 @@ static bool gptneox_eval_internal(
             // for when we want to keep as much of the context as possible, we do not want to recalc kv weights
             // but positional encoding will change when old tokens are removed
             // Q is not cached so it is simply the same as the before version
-            Qcur = ggml_rope(ctx0, Qcur, n_past, n_rot, 2);
+            Qcur = ggml_rope_inplace(ctx0, Qcur, n_past, n_rot, 2, 0);
             // RoPE all in k cache
             // TODO: Should be able to replace view 1d and reshape 3d with a single view 3d
             // Do we need a larger scratch for this temp duplication?
@@ -1234,7 +1223,7 @@ static bool gptneox_eval_internal(
                                                     (n_past + N) * n_embd,
                                                     ggml_element_size(kv_self.k) * il * n_ctx * n_embd),
                                                 n_embd/n_head, n_head, n_past + N));
-            Kall = ggml_rope(ctx0, Kall, 0 /*n_past*/, n_rot, 2); //3);
+            Kall = ggml_rope_inplace(ctx0, Kall, 0 /*n_past*/, n_rot, 2, 0); //3);
             
             // Q = Qcur.contiguous().view(n_embd/n_head, n_head, N).permute(0, 2, 1, 3)
             struct ggml_tensor * Q =
@@ -2077,7 +2066,6 @@ static void gptneox_model_quantize_internal(const std::string & fname_inp, const
     switch (ftype) {
         case GPTNEOX_FTYPE_MOSTLY_Q4_0: quantized_type = GGML_TYPE_Q4_0; break;
         case GPTNEOX_FTYPE_MOSTLY_Q4_1: quantized_type = GGML_TYPE_Q4_1; break;
-        case GPTNEOX_FTYPE_MOSTLY_Q4_2: quantized_type = GGML_TYPE_Q4_2; break;
         case GPTNEOX_FTYPE_MOSTLY_Q5_0: quantized_type = GGML_TYPE_Q5_0; break;
         case GPTNEOX_FTYPE_MOSTLY_Q5_1: quantized_type = GGML_TYPE_Q5_1; break;
         case GPTNEOX_FTYPE_MOSTLY_Q8_0: quantized_type = GGML_TYPE_Q8_0; break;

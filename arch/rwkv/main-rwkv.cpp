@@ -100,9 +100,9 @@ int main(int argc, char ** argv) {
     {
         auto lparams = rwkv_context_default_params();
         
-        lparams.n_ctx      = params.n_ctx;
-        lparams.n_parts    = params.n_parts;
         lparams.seed       = params.seed;
+        lparams.n_ctx      = params.n_ctx;
+        lparams.n_batch    = params.n_batch;
         lparams.f16_rwkv_state     = false; //params.memory_f16;
         lparams.use_mmap   = params.use_mmap;
         lparams.use_mlock  = params.use_mlock;
@@ -138,12 +138,12 @@ int main(int argc, char ** argv) {
     if (params.mem_test) {
         {
             const std::vector<rwkv_token> tmp(params.n_batch, 0);
-            rwkv_eval(ctx, tmp.data()[0], params.n_threads, NULL);
+            rwkv_eval(ctx, tmp.data()[0], NULL);
         }
         
         {
             const std::vector<rwkv_token> tmp = { 0, };
-            rwkv_eval(ctx, tmp.data()[0], params.n_threads, NULL);
+            rwkv_eval(ctx, tmp.data()[0], NULL);
         }
         
         rwkv_print_timings(ctx);
@@ -252,7 +252,7 @@ int main(int argc, char ** argv) {
         }
         
         // Tokenize prompt with oasst special tokens
-        buffer = "### Instruction: " + buffer + "\n### Response:";
+        buffer = "\n# Instruction:\n" + buffer + "\n\n# Response:\n";
         auto prompt = ::rwkv_tokenize(ctx, buffer, false);
         auto input = std::vector<rwkv_token>();
         //input.push_back(prompter_id);
@@ -300,7 +300,7 @@ int main(int argc, char ** argv) {
         while (input_i < n_input) {
             //auto remaining = n_input - input_i;
             //int n_eval = params.n_batch < remaining ? params.n_batch : remaining;
-            if (rwkv_eval(ctx, input[input_i], params.n_threads, NULL)) {
+            if (rwkv_eval(ctx, input[input_i], NULL)) {
                 fprintf(stderr, "%s : failed to eval\n", __func__);
                 return 1;
             }
@@ -402,6 +402,11 @@ int main(int argc, char ** argv) {
                 output_enabled = false;
                 continue;
             }
+            // Check for "\n\n" which is used as end of response in rwkv models
+            if (id == rwkv_str_to_token(ctx, "\n\n") {
+                output_enabled = false;
+                continue;
+            }
             // Check for bos - skip callback if so
             bool skip_callback = false;
             if (id == rwkv_token_bos()) {
@@ -415,7 +420,7 @@ int main(int argc, char ** argv) {
             // Check if we need to run another eval
             if (output_enabled) {
                 // Send generated token back into model for next generation
-                if (rwkv_eval(ctx, id, params.n_threads, NULL)) {
+                if (rwkv_eval(ctx, id, NULL)) {
                     fprintf(stderr, "%s : failed to eval\n", __func__);
                     return 1;
                 }

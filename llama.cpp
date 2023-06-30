@@ -2210,11 +2210,10 @@ llama_token llama_sample_token(struct llama_context * ctx, llama_token_data_arra
 
 static void llama_model_update_internal(const std::string & fname_inp, const std::string & fname_out) {
     std::unique_ptr<llama_model_loader> model_loader(new llama_model_loader(fname_inp.c_str(),
-                                                            /*use_mmap*/ false,
-                                                            /*vocab_only*/ false));
+                                                            /*use_mmap*/ false));
     // Simply use the ftype of the first file
-    auto ftype = model_loader->file_loaders[0]->hparams.ftype;
-    llama_file_saver file_saver(fname_out.c_str(), model_loader->file_loaders.at(0).get(), ftype);
+    auto ftype = model_loader->file_loader->hparams.ftype;
+    llama_file_saver file_saver(fname_out.c_str(), model_loader->file_loader.get(), ftype);
 
     size_t idx = 0;
     for (llama_load_tensor & tensor : model_loader->tensors_map.tensors) {
@@ -3016,7 +3015,7 @@ int llama_get_kv_cache_token_count(const struct llama_context * ctx) {
 // Assumes contiguous data
 void llama_shift_kv_cache(struct llama_context * ctx, int n) {
     auto & model = ctx->model;
-    auto & kv_self = model.kv_self;
+    auto & kv_self = ctx->kv_self;
     auto & hparams = model.hparams;
     auto n_layer = hparams.n_layer;
     auto n_embd = hparams.n_embd;

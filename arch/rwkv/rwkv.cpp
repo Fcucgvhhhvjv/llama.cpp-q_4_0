@@ -568,7 +568,6 @@ struct rwkv_file_loader {
                 case GGML_TYPE_F16:
                 case GGML_TYPE_Q4_0:
                 case GGML_TYPE_Q4_1:
-                case GGML_TYPE_Q4_2:
                 case GGML_TYPE_Q5_0:
                 case GGML_TYPE_Q5_1:
                 case GGML_TYPE_Q8_0:
@@ -629,9 +628,9 @@ struct rwkv_file_saver {
         file.write_u32(new_ftype);
     }
     void write_vocab() {
-        if (any_file_loader->file_version == GGML_FILE_VERSION_GGML) {
+        /*if (any_file_loader->file_version == GGML_FILE_VERSION_GGML) {
             fprintf(stderr, "rwkv: WARNING: input is an old file that doesn't have scores; will add dummy scores\n");
-        }
+        }*/
         uint32_t n_vocab = any_file_loader->hparams.n_vocab;
         for (uint32_t i = 0; i < n_vocab; i++) {
             const auto & token = any_file_loader->vocab.id_to_token.at(i);
@@ -651,7 +650,6 @@ struct rwkv_file_saver {
             case GGML_TYPE_F16:
             case GGML_TYPE_Q4_0:
             case GGML_TYPE_Q4_1:
-            case GGML_TYPE_Q4_2:
             case GGML_TYPE_Q5_0:
             case GGML_TYPE_Q5_1:
             case GGML_TYPE_Q8_0:
@@ -680,7 +678,7 @@ struct rwkv_model_loader {
     rwkv_model_loader(const std::string & fname_base, bool use_mmap, bool vocab_only) {
         auto first_file = new rwkv_file_loader(fname_base.c_str(), 0, tensors_map);
         file_loaders.emplace_back(first_file);
-        uint32_t n_parts = vocab_only ? 1 : guess_n_parts();
+        uint32_t n_parts = 1;
         for (uint32_t i = 1; i < n_parts; i++) {
             std::string fname = fname_base + "." + std::to_string(i);
             auto ith_file = new rwkv_file_loader(fname.c_str(), i, tensors_map);
@@ -711,15 +709,6 @@ struct rwkv_model_loader {
             }
         }
         return false;
-    }
-
-    uint32_t guess_n_parts() const {
-        auto it = tensors_map.name_to_idx.find("rwkv.embeddings.weight");
-        if (it == tensors_map.name_to_idx.end()) {
-            throw std::string("missing rwkv.embeddings.weight");
-        }
-        const rwkv_load_tensor & lt = tensors_map.tensors.at(it->second);
-        return file_loaders.at(0)->hparams.n_embd / lt.shards.at(0).ne.at(0);
     }
 
     void calc_sizes(size_t * ctx_size_p, size_t * mmapped_size_p) const {
@@ -968,9 +957,9 @@ static bool rwkv_state_init(const struct rwkv_hparams & hparams,
 
 struct rwkv_context_params rwkv_context_default_params() {
     struct rwkv_context_params result = {
+        /*.seed                        =*/ DEFAULT_SEED,
         /*.n_ctx                       =*/ 512,
-        /*.n_parts                     =*/ -1,
-        /*.seed                        =*/ 0,
+        /*.n_batch                     =*/ 512,
         /*.f16_rwkv_state              =*/ false,
         /*.logits_all                  =*/ //false,
         /*.vocab_only                  =*/ false,
@@ -1013,8 +1002,6 @@ static const char *ggml_ftype_name(enum ggml_ftype ftype) {
         case GGML_FTYPE_MOSTLY_Q4_1: return "mostly Q4_1";
         case GGML_FTYPE_MOSTLY_Q4_1_SOME_F16:
                                       return "mostly Q4_1, some F16";
-        case GGML_FTYPE_MOSTLY_Q4_2: return "mostly Q4_2";
-        //case GGML_FTYPE_MOSTLY_Q4_3: return "mostly Q4_3";
         case GGML_FTYPE_MOSTLY_Q5_0: return "mostly Q5_0";
         case GGML_FTYPE_MOSTLY_Q5_1: return "mostly Q5_1";
         case GGML_FTYPE_MOSTLY_Q8_0: return "mostly Q8_0";
@@ -1798,7 +1785,7 @@ private:
             return;
         }
 
-        const auto &tok_score = vocab_.id_to_token[(*token).second];
+        //const auto &tok_score = vocab_.id_to_token[(*token).second];
 
         rwkv_sp_bigram bigram;
         bigram.left = left;
@@ -2363,7 +2350,6 @@ static void rwkv_model_quantize_internal(const std::string & fname_inp, const st
     switch (ftype) {
         case GGML_FTYPE_MOSTLY_Q4_0: quantized_type = GGML_TYPE_Q4_0; break;
         case GGML_FTYPE_MOSTLY_Q4_1: quantized_type = GGML_TYPE_Q4_1; break;
-        case GGML_FTYPE_MOSTLY_Q4_2: quantized_type = GGML_TYPE_Q4_2; break;
         case GGML_FTYPE_MOSTLY_Q5_0: quantized_type = GGML_TYPE_Q5_0; break;
         case GGML_FTYPE_MOSTLY_Q5_1: quantized_type = GGML_TYPE_Q5_1; break;
         case GGML_FTYPE_MOSTLY_Q8_0: quantized_type = GGML_TYPE_Q8_0; break;

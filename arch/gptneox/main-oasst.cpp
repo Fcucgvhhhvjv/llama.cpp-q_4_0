@@ -100,9 +100,9 @@ int main(int argc, char ** argv) {
     {
         auto lparams = gptneox_context_default_params();
         
-        lparams.n_ctx      = params.n_ctx;
-        lparams.n_parts    = params.n_parts;
         lparams.seed       = params.seed;
+        lparams.n_ctx      = params.n_ctx;
+        lparams.n_batch    = params.n_batch;
         lparams.f16_kv     = params.memory_f16;
         lparams.use_mmap   = params.use_mmap;
         lparams.use_mlock  = params.use_mlock;

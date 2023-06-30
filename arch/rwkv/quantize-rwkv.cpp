@@ -8,7 +8,7 @@
 static const std::map<std::string, enum ggml_ftype> GGML_FTYPE_MAP = {
   {"q4_0", GGML_FTYPE_MOSTLY_Q4_0},
   {"q4_1", GGML_FTYPE_MOSTLY_Q4_1},
-  {"q4_2", GGML_FTYPE_MOSTLY_Q4_2},
+  //{"q4_2", GGML_FTYPE_MOSTLY_Q4_2},
   //{"q4_3", GGML_FTYPE_MOSTLY_Q4_3},
   {"q5_0", GGML_FTYPE_MOSTLY_Q5_0},
   {"q5_1", GGML_FTYPE_MOSTLY_Q5_1},

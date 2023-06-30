@@ -25,6 +25,8 @@
 #define GGJT_FILE_MAGIC 0x67676a74 // 'ggjt' in hex
 #define GGML_FILE_MAGIC_UNVERSIONED 0x67676d6c // pre-versioned files
 
+#define DEFAULT_SEED           0xFFFFFFFF
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -54,9 +56,9 @@ extern "C" {
     typedef void (*rwkv_progress_callback)(float progress, void *ctx);
 
     struct rwkv_context_params {
-        int n_ctx;   // text context
-        int n_parts; // -1 for default
-        int seed;    // RNG seed, 0 for random
+        uint32_t seed;      // RNG seed, 0 for random
+        int32_t  n_ctx;     // text context
+        int32_t  n_batch;   // prompt processing batch size
 
         bool f16_rwkv_state;     // use fp16 for RWKV state
         //bool logits_all; // the rwkv_eval() call computes all logits, not just the last one
