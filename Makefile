@@ -325,6 +325,9 @@ quantize-rwkv: arch/rwkv/quantize-rwkv.cpp build-info.h ggml.o rwkv.o $(OBJS)
 
 quantize: examples/quantize/quantize.cpp                      build-info.h ggml.o llama.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
+	
+quantize-stats: examples/quantize-stats/quantize-stats.cpp    build-info.h ggml.o llama.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 		
 update-llama: update-llama.cpp build-info.h ggml.o llama.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
@@ -333,9 +336,6 @@ update-gptneox: arch/gptneox/update-gptneox.cpp build-info.h ggml.o gptneox.o $(
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 
 update-rwkv: arch/rwkv/update-rwkv.cpp build-info.h ggml.o rwkv.o $(OBJS)
-	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
-
-quantize-stats: examples/quantize-stats/quantize-stats.cpp    build-info.h ggml.o llama.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 
 perplexity: examples/perplexity/perplexity.cpp                build-info.h ggml.o llama.o common.o $(OBJS)
