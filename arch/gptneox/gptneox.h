@@ -195,8 +195,6 @@ extern "C" {
     // Special tokens
     GPTNEOX_API gptneox_token gptneox_token_bos();
     GPTNEOX_API gptneox_token gptneox_token_eos();
-    // GPTNEOX_API gptneox_token gptneox_token_nl();
-
 
     // Sampling functions
 

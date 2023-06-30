@@ -280,6 +280,11 @@ extern "C" {
         GGML_OP_SILU,
         GGML_OP_NORM, // normalize
         GGML_OP_RMS_NORM,
+        
+        GGML_OP_EXT_MAX,
+        GGML_OP_EXT_EXP,
+        GGML_OP_EXT_ONE_MINUS_X,
+        GGML_OP_EXT_SIGMOID,
 
         GGML_OP_MUL_MAT,
 
@@ -576,6 +581,26 @@ extern "C" {
     GGML_API struct ggml_tensor * ggml_rms_norm(
             struct ggml_context * ctx,
             struct ggml_tensor  * a);
+
+
+    // Ext functions (for rwkv)
+    GGML_API struct ggml_tensor * ggml_ext_max(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b);
+
+    GGML_API struct ggml_tensor * ggml_ext_exp(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a);
+
+    GGML_API struct ggml_tensor * ggml_ext_one_minus_x(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a);
+
+    GGML_API struct ggml_tensor * ggml_ext_sigmoid(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a);
+    
 
     // A: m rows, n columns
     // B: p rows, n columns (i.e. we transpose it internally)

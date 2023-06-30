@@ -5,7 +5,7 @@ cd `dirname $0`
 
 # download model to models dir
 echo "Downloading model"
-python ./convert_gptneox_to_ggml.py OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5 ../models/pythia
+python ./convert-gptneox-to-ggml.py OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5 ../models/pythia
 
 # remove temp cache dir
 echo "Removing temp cache dir"

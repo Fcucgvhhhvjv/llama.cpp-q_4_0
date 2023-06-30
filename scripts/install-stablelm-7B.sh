@@ -5,7 +5,7 @@ cd `dirname $0`
 
 # download model to models dir
 echo "Downloading model"
-python ./convert_gptneox_to_ggml.py OpenAssistant/stablelm-7b-sft-v7-epoch-3 ../models/stablelm
+python ./convert-gptneox-to-ggml.py OpenAssistant/stablelm-7b-sft-v7-epoch-3 ../models/stablelm
 
 # remove temp cache dir
 echo "Removing temp cache dir"

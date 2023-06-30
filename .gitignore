@@ -26,11 +26,14 @@ models/*
 /main
 /main-gptneox
 /main-oasst
+/main-rwkv
 /quantize
 /quantize-gptneox
+/quantize-rwkv
 /quantize-stats
 /update-llama
 /update-gptneox
+/update-rwkv
 /result
 /perplexity
 /embedding

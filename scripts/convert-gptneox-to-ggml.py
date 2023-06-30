@@ -1,11 +1,4 @@
 # Convert Hugging Face fine-tuned gpt-neox-like models to ggml format
-#
-# Usage:
-#
-#   python3 models/convert-h5-to-ggml.py
-#
-# This script is similar to "convert-pt-to-ggml.py"
-#
 
 import io
 import os
@@ -17,28 +10,6 @@ import torch
 import numpy as np
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
-# ref: https://github.com/openai/gpt-2/blob/master/src/encoder.py
-def bytes_to_unicode():
-    """
-    Returns list of utf-8 byte and a corresponding list of unicode strings.
-    The reversible bpe codes work on unicode strings.
-    This means you need a large # of unicode characters in your vocab if you want to avoid UNKs.
-    When you're at something like a 10B token dataset you end up needing around 5K for decent coverage.
-    This is a significant percentage of your normal, say, 32K bpe vocab.
-    To avoid that, we want lookup tables between utf-8 bytes and unicode strings.
-    And avoids mapping to whitespace/control characters the bpe code barfs on.
-    """
-    bs = list(range(ord("!"), ord("~")+1))+list(range(ord("¡"), ord("¬")+1))+list(range(ord("®"), ord("ÿ")+1))
-    cs = bs[:]
-    n = 0
-    for b in range(2**8):
-        if b not in bs:
-            bs.append(b)
-            cs.append(2**8+n)
-            n += 1
-    cs = [chr(n) for n in cs]
-    return dict(zip(bs, cs))
 
 if len(sys.argv) < 3:
     print("Usage: python convert-hf-to-ggml.py model_name dir-output [use-f32]")
@@ -73,6 +44,8 @@ for p in model.parameters():
 hparams = model.config.to_dict()
 print("Model loaded: ", model_name)
 
+print(hparams)
+
 fn_bin = f"/ggml-{model_name.split('/')[-1]}-{ftype_str[ftype]}.bin"
 fn_out = dir_out + fn_bin
 fout = open(fn_out, "wb")
@@ -103,8 +76,6 @@ for i in range(hparams["vocab_size"]):
     fout.write(text)
 
 list_vars = model.state_dict()
-
-print(hparams)
 
 for name in list_vars.keys():
     if name.startswith('gpt_neox.layers.'):

@@ -1,5 +1,5 @@
 # Define the default target now so that it is always the first target
-default: main main-gptneox main-oasst quantize quantize-gptneox quantize-stats update-llama update-gptneox perplexity embedding vdot
+default: main main-gptneox main-oasst main-rwkv quantize quantize-gptneox quantize-rwkv quantize-stats update-llama update-gptneox update-rwkv perplexity embedding vdot
 
 ifndef UNAME_S
 UNAME_S := $(shell uname -s)
@@ -187,20 +187,26 @@ ggml.o: ggml.c ggml.h ggml-cuda.h
 llama.o: llama.cpp ggml.h ggml-cuda.h llama.h llama-util.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 	
-gptneox.o: gptneox/gptneox.cpp ggml.h gptneox/gptneox.h gptneox/gptneox-util.h
+gptneox.o: arch/gptneox/gptneox.cpp ggml.h arch/gptneox/gptneox.h arch/gptneox/gptneox-util.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+	
+rwkv.o: arch/rwkv/rwkv.cpp ggml.h arch/rwkv/rwkv.h arch/arch-util.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 common.o: examples/common.cpp examples/common.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 	
-common-gptneox.o: gptneox/common-gptneox.cpp gptneox/common-gptneox.h
+common-gptneox.o: arch/gptneox/common-gptneox.cpp arch/gptneox/common-gptneox.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+	
+common-rwkv.o: arch/rwkv/common-rwkv.cpp arch/rwkv/common-rwkv.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 	
 libllama.so: llama.o ggml.o $(OBJS)
 	$(CXX) $(CXXFLAGS) -shared -fPIC -o $@ $^ $(LDFLAGS)
 
 clean:
-	rm -vf *.o main main-oasst main-gptneox quantize quantize-gptneox quantize-stats update-llama update-gptneox perplexity embedding benchmark-matmult  save-load-state build-info.h
+	rm -vf *.o main main-oasst main-gptneox main-rwkv quantize quantize-gptneox quantize-rwkv quantize-stats update-llama update-gptneox update-rwkv perplexity embedding benchmark-matmult  save-load-state build-info.h
 
 #
 # Examples
@@ -212,13 +218,19 @@ main: examples/main/main.cpp build-info.h ggml.o llama.o common.o $(OBJS)
 	@echo '====  Run ./main -h for help.  ===='
 	@echo
 	
-main-gptneox: gptneox/main-gptneox.cpp build-info.h ggml.o gptneox.o common-gptneox.o $(OBJS)
+main-gptneox: arch/gptneox/main-gptneox.cpp build-info.h ggml.o gptneox.o common-gptneox.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 	@echo
 	@echo '====  Run ./main -h for help.  ===='
 	@echo
 	
-main-oasst: gptneox/main-oasst.cpp build-info.h ggml.o gptneox.o common-gptneox.o $(OBJS)
+main-oasst: arch/gptneox/main-oasst.cpp build-info.h ggml.o gptneox.o common-gptneox.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
+	@echo
+	@echo '====  Run ./main -h for help.  ===='
+	@echo
+	
+main-rwkv: arch/rwkv/main-rwkv.cpp build-info.h ggml.o rwkv.o common-rwkv.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 	@echo
 	@echo '====  Run ./main -h for help.  ===='
@@ -227,7 +239,10 @@ main-oasst: gptneox/main-oasst.cpp build-info.h ggml.o gptneox.o common-gptneox.
 quantize: examples/quantize/quantize.cpp build-info.h ggml.o llama.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 	
-quantize-gptneox: gptneox/quantize-gptneox.cpp build-info.h ggml.o gptneox.o $(OBJS)
+quantize-gptneox: arch/gptneox/quantize-gptneox.cpp build-info.h ggml.o gptneox.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
+	
+quantize-rwkv: arch/rwkv/quantize-rwkv.cpp build-info.h ggml.o rwkv.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 
 quantize-stats: examples/quantize-stats/quantize-stats.cpp build-info.h ggml.o llama.o $(OBJS)
@@ -236,7 +251,10 @@ quantize-stats: examples/quantize-stats/quantize-stats.cpp build-info.h ggml.o l
 update-llama: update-llama.cpp build-info.h ggml.o llama.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 
-update-gptneox: gptneox/update-gptneox.cpp build-info.h ggml.o gptneox.o $(OBJS)
+update-gptneox: arch/gptneox/update-gptneox.cpp build-info.h ggml.o gptneox.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
+
+update-rwkv: arch/rwkv/update-rwkv.cpp build-info.h ggml.o rwkv.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 
 perplexity: examples/perplexity/perplexity.cpp build-info.h ggml.o llama.o common.o $(OBJS)

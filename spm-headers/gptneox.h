@@ -1,1 +1,1 @@
-../gptneox/gptneox.h
+../arch/gptneox/gptneox.h
