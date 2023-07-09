@@ -157,8 +157,13 @@ extern "C" {
     // n_past is the number of tokens to use from previous eval calls
     // Returns 0 on success
     RWKV_API int rwkv_eval(struct rwkv_context * ctx,
-                                const rwkv_token token,
-                           const char * dot_path);
+                            const rwkv_token     token,
+                            const char         * dot_path);
+
+    RWKV_API int rwkv_opt(struct rwkv_context * ctx,
+                            const rwkv_token     token,
+                            const rwkv_token     actual,
+                            const char         * dot_path);
 
     // Convert the provided text into tokens.
     // The tokens pointer must be large enough to hold the resulting tokens.
@@ -182,6 +187,9 @@ extern "C" {
     // Rows: n_tokens
     // Cols: n_vocab
     RWKV_API float * rwkv_get_logits(struct rwkv_context * ctx);
+
+    RWKV_API float rwkv_get_error_before(struct rwkv_context * ctx);
+    RWKV_API float rwkv_get_error_after(struct rwkv_context * ctx);
 
     // Get the embeddings for the input
     // shape: [n_embd] (1-dimensional)

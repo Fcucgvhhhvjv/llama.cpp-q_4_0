@@ -1,6 +1,9 @@
-# gptneox.cpp
+# llm.cpp
 
-A simple demonstration on how to adapt ggerganov/llama.cpp to use OpenAssistant (GPT-NeoX based) models like stablelm and oasst.
+A simple demonstration on how to adapt ggerganov/llama.cpp to use other large language models.
+- OpenAssistant (GPT-NeoX based) models like stablelm and oasst.
+- RWKV (v4)
+- RefinedWeb
 
 ## Notes:
 - All gptneox source files are in the examples/gptneox directory, minimal changes have been made to maybe merge with llama.cpp in the future. Only the makefile has been modified. GPT-NeoX related scripts are all located in the scripts directory.

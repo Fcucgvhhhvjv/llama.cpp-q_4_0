@@ -56,7 +56,7 @@ static const std::map<e_model, size_t> & MEM_REQ_SCRATCH0()
     static std::map<e_model, size_t> _MEM_REQ_SCRATCH0 = {
         { MODEL_169M,  256ull * MiB },
         { MODEL_430M,  256ull * MiB },
-        { MODEL_3B,    256ull * MiB },
+        { MODEL_3B,    512ull * MiB },
         { MODEL_7B,    512ull * MiB },
         { MODEL_14B,   512ull * MiB },
         //{ MODEL_20B,   512ull * MiB },
@@ -70,7 +70,7 @@ static const std::map<e_model, size_t> & MEM_REQ_SCRATCH1()
     static std::map<e_model, size_t> _MEM_REQ_SCRATCH1 = {
         { MODEL_169M,  256ull * MiB },
         { MODEL_430M,  256ull * MiB },
-        { MODEL_3B,    256ull * MiB },
+        { MODEL_3B,    512ull * MiB },
         { MODEL_7B,    512ull * MiB },
         { MODEL_14B,   512ull * MiB },
         //{ MODEL_20B,   512ull * MiB },
@@ -86,7 +86,7 @@ static const std::map<e_model, size_t> & MEM_REQ_KV_SELF()
     static std::map<e_model, size_t> _MEM_REQ_KV_SELF = {
         { MODEL_169M, 512ull * MiB },
         { MODEL_430M, 512ull * MiB },
-        { MODEL_3B,   512ull * MiB },
+        { MODEL_3B,   1024ull * MiB },
         { MODEL_7B,   1026ull * MiB },
         { MODEL_14B,  1608ull * MiB },
         //{ MODEL_20B,  1608ull * MiB },
@@ -102,7 +102,7 @@ static const std::map<e_model, size_t> & MEM_REQ_EVAL()
     static std::map<e_model, size_t> _MEM_REQ_EVAL = {
         { MODEL_169M, 512ull * MiB },
         { MODEL_430M, 512ull * MiB },
-        { MODEL_3B,   512ull * MiB },
+        { MODEL_3B,  3072ull * MiB },
         { MODEL_7B,   768ull * MiB },
         { MODEL_14B, 1024ull * MiB },
         //{ MODEL_20B, 1024ull * MiB },
@@ -191,6 +191,13 @@ struct rwkv_state {
     
     // Output logits
     struct ggml_tensor * logits;
+    
+    // Actual target/error values (for optimizing)
+    struct ggml_tensor * targets;
+    struct ggml_tensor * errors;
+    
+    float error_before = 0;
+    float error_after = 0;
     
     // Layers states
     struct ggml_tensor * input_state;
@@ -878,10 +885,13 @@ static bool rwkv_state_init(const struct rwkv_hparams & hparams,
     const int64_t n_elements = n_embd * (int64_t)n_layer;
 
     // TODO: Extra overflow MiB needed?
-    size_t state_size = 2 * 5 * n_elements * ggml_type_size(wtype);
-    size_t logits_size = n_vocab * ggml_type_size(GGML_TYPE_F32);
-    size_t token_size = 1 * ggml_type_size(GGML_TYPE_I32);
-    state.buf.resize(state_size + logits_size + token_size + MiB);
+    size_t token_size   = 1 * ggml_type_size(GGML_TYPE_I32);
+    size_t logits_size  = n_vocab * ggml_type_size(GGML_TYPE_F32);
+    size_t targets_size = n_vocab * ggml_type_size(GGML_TYPE_F32);
+    size_t errors_size  = n_vocab * ggml_type_size(GGML_TYPE_F32);
+    size_t state_size   = 2 * 5 * n_elements * ggml_type_size(wtype);
+    
+    state.buf.resize(token_size + logits_size + targets_size + errors_size + state_size + MiB);
 
     struct ggml_init_params params;
     params.mem_size   = state.buf.size;
@@ -895,8 +905,11 @@ static bool rwkv_state_init(const struct rwkv_hparams & hparams,
         return false;
     }
     
-    struct ggml_tensor * token = ggml_new_i32(state.ctx, 0);
-    struct ggml_tensor * logits = ggml_new_tensor_1d(state.ctx, GGML_TYPE_F32, n_vocab);
+    struct ggml_tensor * token   = ggml_new_i32(state.ctx, 0);
+    struct ggml_tensor * logits  = ggml_new_tensor_1d(state.ctx, GGML_TYPE_F32, n_vocab);
+    
+    struct ggml_tensor * targets = ggml_new_tensor_1d(state.ctx, GGML_TYPE_F32, n_vocab);
+    struct ggml_tensor * errors  = ggml_new_tensor_1d(state.ctx, GGML_TYPE_F32, n_vocab);
     
     struct ggml_tensor * input  = ggml_new_tensor_1d(state.ctx, wtype, n_embd * 5 * n_layer);
     struct ggml_tensor * output = ggml_new_tensor_1d(state.ctx, wtype, n_embd * 5 * n_layer);
@@ -946,6 +959,8 @@ static bool rwkv_state_init(const struct rwkv_hparams & hparams,
     
     state.token         = token;
     state.logits        = logits;
+    state.targets       = targets;
+    state.errors        = errors;
     state.input_state   = input;
     state.output_state  = output;
     state.input_layers  = std::move(inputs);
@@ -1081,6 +1096,10 @@ static void rwkv_model_load_internal(
 
     size_t ctx_size, mmapped_size;
     ml->calc_sizes(&ctx_size, &mmapped_size);
+    
+    // Optimizer needs twice as much for grad
+    ctx_size *= 2;
+    
     fprintf(stderr, "%s: ggml ctx size = %6.2f KiB\n", __func__, ctx_size/1024.0);
 
     // print memory requirements
@@ -1239,6 +1258,52 @@ static bool rwkv_model_load(
     }
 }
 
+static void rwkv_model_set_param(rwkv_context & lctx) {
+    auto & model = lctx.model;
+    struct ggml_context* ctx = model.ctx;
+    const auto & hparams = model.hparams;
+    const uint32_t n_layer = hparams.n_layer;
+    
+    /*auto & state = model.state;
+    ggml_set_param(ctx, state.token);
+    ggml_set_param(ctx, state.logits);
+    ggml_set_param(ctx, state.targets);
+    ggml_set_param(ctx, state.errors);*/
+    
+    ggml_set_param(ctx, model.wte);
+    ggml_set_param(ctx, model.ln_pre_g);
+    ggml_set_param(ctx, model.ln_pre_b);
+    ggml_set_param(ctx, model.ln_out_g);
+    ggml_set_param(ctx, model.ln_out_b);
+    ggml_set_param(ctx, model.lmh_w);
+    
+    for (uint32_t i = 0; i < n_layer; i++) {
+        auto & layer = model.layers[i];
+        ggml_set_param(ctx, layer.ln_1_g);
+        ggml_set_param(ctx, layer.ln_1_b);
+        
+        ggml_set_param(ctx, layer.attn_time_mix_k);
+        ggml_set_param(ctx, layer.attn_time_mix_v);
+        ggml_set_param(ctx, layer.attn_time_mix_r);
+        ggml_set_param(ctx, layer.attn_time_first);
+        ggml_set_param(ctx, layer.attn_time_decay);
+        
+        ggml_set_param(ctx, layer.attn_k_w);
+        ggml_set_param(ctx, layer.attn_v_w);
+        ggml_set_param(ctx, layer.attn_r_w);
+        ggml_set_param(ctx, layer.attn_out_w);
+        
+        ggml_set_param(ctx, layer.ln_2_g);
+        ggml_set_param(ctx, layer.ln_2_b);
+        
+        ggml_set_param(ctx, layer.ff_k_w);
+        ggml_set_param(ctx, layer.ff_v_w);
+        ggml_set_param(ctx, layer.ff_r_w);
+        ggml_set_param(ctx, layer.ff_time_mix_k);
+        ggml_set_param(ctx, layer.ff_time_mix_r);
+    }
+}
+
 // ggml ext functions - now built-in to ggml because map_unary is having some func addressing issues when pre-building graph
 /*
 // max
@@ -1315,289 +1380,320 @@ static inline struct ggml_tensor * rwkv_layer_norm(ggml_context * ctx, struct gg
     return ggml_add_inplace(ctx, ggml_mul(ctx, ggml_norm(ctx, x), weight), bias);
 }
 
-// evaluate the transformer
-//
-//   - lctx:      rwkv context
-//   - token:     new token to process
-//   - n_threads: number of threads to use
-//
+// a is actual, b is predicted
+struct ggml_tensor * rwkv_squared_error_loss(struct ggml_context * ctx, struct ggml_tensor * a, struct ggml_tensor * b) {
+    return /*ggml_sum(ctx, */ggml_sqr(ctx, ggml_sub(ctx, a, b)); //);
+}
 
-static bool rwkv_eval_internal(struct rwkv_context & lctx,
-                               const rwkv_token      token,
-                               const char *          dot_path) {
-    const int64_t t_start_us = ggml_time_us();
+// a is actual, b is predicted
+struct ggml_tensor * rwkv_cross_entropy_loss(struct ggml_context * ctx, struct ggml_tensor * a, struct ggml_tensor * b) {
+    const float eps = 1e-3f;
+    return
+        ggml_sum(ctx,
+            ggml_neg(ctx,
+                ggml_sum_rows(ctx,
+                    ggml_mul(ctx,
+                        ggml_soft_max(ctx, a),
+                        ggml_log(ctx,
+                            ggml_add1(ctx,
+                                ggml_soft_max(ctx, b),
+                                ggml_new_f32(ctx, eps)))))));
+}
 
+static ggml_tensor * rwkv_build_graph(struct rwkv_context & lctx) {
     auto & model   = lctx.model;
     auto & state = model.state;
     const auto & hparams = model.hparams;
-
-    auto & mem_per_token = lctx.mem_per_token;
     
     ARCH_ASSERT(!!state.ctx);
     
     // Check if we need to create context and graph
     struct ggml_context * ctx = lctx.ctx;
-    //struct ggml_cgraph cg = *lctx.cg;
-    if (ctx == NULL) {
-        const int n_embd  = hparams.n_embd;
-        const int n_layer = hparams.n_layer;
-        //const int n_ctx   = hparams.n_ctx;
-        //const int n_head  = hparams.n_head;
-        const int n_vocab = hparams.n_vocab;
-        //const int n_rot   = hparams.n_rot;
-        const int rescale_every  = hparams.rescale_every;
-        
-        auto & buf_compute   = lctx.buf_compute;
+    lctx.cg = {};
+    
+    const int n_embd  = hparams.n_embd;
+    const int n_layer = hparams.n_layer;
+    //const int n_ctx   = hparams.n_ctx;
+    //const int n_head  = hparams.n_head;
+    const int n_vocab = hparams.n_vocab;
+    //const int n_rot   = hparams.n_rot;
+    const int rescale_every  = hparams.rescale_every;
+    
+    auto & buf_compute   = lctx.buf_compute;
 
-        struct ggml_init_params params = {
-            /*.mem_size   =*/ buf_compute.size,
-            /*.mem_buffer =*/ buf_compute.addr,
-            /*.no_alloc   =*/ false,
-        };
-        
-        // ggml context for rwkv context
-        ctx = ggml_init(params);
-        lctx.ctx = ctx;
-        
-        // for big prompts, if BLAS is enabled, it is better to use only one thread
-        // otherwise, the threads are spin-lock waiting for the BLAS calls and are degrading the performance
-        //struct ggml_cgraph cg = {};
-        //lctx.cg = new ggml_cgraph();
-        //cg = *lctx.cg;
-        lctx.cg.n_threads = 1; //N >= 32 && ggml_cpu_has_blas() && !ggml_cpu_has_cublas() ? 1 : n_threads;
-        
-        // Token embedding
-        //printf("eval token in %d %s\n", token, rwkv_token_to_str(&lctx, token));
-        //struct ggml_tensor * id = ggml_new_i32(ctx, token);
-        //strcpy(id->name, "id");
-        
-        struct ggml_tensor * inpL = ggml_get_rows(ctx, model.wte, state.token); //id);
-        //strcpy(inpL->name, "inpL");
-        
-        // MARK: layer norm pre
-        // inpL = ln_pre_g * norm(inpL) + ln_pre_b
-        inpL = rwkv_layer_norm(ctx, inpL, model.ln_pre_g, model.ln_pre_b);
-        //strcpy(inpL->name, "ln_pre");
-        
-        //printf("eval layers\n");
+    struct ggml_init_params params = {
+        /*.mem_size   =*/ buf_compute.size,
+        /*.mem_buffer =*/ buf_compute.addr,
+        /*.no_alloc   =*/ false,
+    };
+    
+    // ggml context for rwkv context
+    ctx = ggml_init(params);
+    
+    // for big prompts, if BLAS is enabled, it is better to use only one thread
+    // otherwise, the threads are spin-lock waiting for the BLAS calls and are degrading the performance
+    //struct ggml_cgraph cg = {};
+    //lctx.cg = new ggml_cgraph();
+    //cg = *lctx.cg;
+    lctx.cg.n_threads = 1; //N >= 32 && ggml_cpu_has_blas() && !ggml_cpu_has_cublas() ? 1 : n_threads;
+    
+    // Token embedding
+    //printf("eval token in %d %s\n", token, rwkv_token_to_str(&lctx, token));
+    //struct ggml_tensor * id = ggml_new_i32(ctx, token);
+    //strcpy(id->name, "id");
+    
+    struct ggml_tensor * inpL = ggml_get_rows(ctx, model.wte, state.token); //id);
+    //strcpy(inpL->name, "inpL");
+    
+    // MARK: layer norm pre
+    // inpL = ln_pre_g * norm(inpL) + ln_pre_b
+    inpL = rwkv_layer_norm(ctx, inpL, model.ln_pre_g, model.ln_pre_b);
+    //strcpy(inpL->name, "ln_pre");
+    
+    //printf("eval layers\n");
 
-        for (int i = 0; i < n_layer; i++) {
-            //struct rwkv_layer & layer = model.layers[i];
-            struct rwkv_layer & layer = model.layers[i];
-            
-            struct rwkv_layer_state input_state  = state.input_layers[i];
-            struct rwkv_layer_state & output_state = state.output_layers[i];
-            
-            lctx.use_buf(ctx, 0);
-            
-            struct ggml_tensor * inpAttn = inpL;
+    for (int i = 0; i < n_layer; i++) {
+        //struct rwkv_layer & layer = model.layers[i];
+        struct rwkv_layer & layer = model.layers[i];
+        
+        struct rwkv_layer_state input_state  = state.input_layers[i];
+        struct rwkv_layer_state & output_state = state.output_layers[i];
+        
+        lctx.use_buf(ctx, 0);
+        
+        struct ggml_tensor * inpAttn = inpL;
 
-            // MARK: layer norm 1
-            // cur = ln_1_g * norm(inpL) + ln_1_b
-            struct ggml_tensor * cur = rwkv_layer_norm(ctx, inpAttn, layer.ln_1_g, layer.ln_1_b);
-            //strcpy(cur->name, "ln1");
+        // MARK: layer norm 1
+        // cur = ln_1_g * norm(inpL) + ln_1_b
+        struct ggml_tensor * cur = rwkv_layer_norm(ctx, inpAttn, layer.ln_1_g, layer.ln_1_b);
+        //strcpy(cur->name, "ln1");
 
-            // MARK: attention (time mixing)
-            {
-                // Mix current token embedding with the previous timestep to produce key, value, receptance
-                // xx = state[5*i+1]
-                struct ggml_tensor *& x_prev = input_state.attn;
-                // xr = x * time_mix_r + xx * (1 - time_mix_r) "x_rec"
-                struct ggml_tensor * x_rec = ggml_add_inplace(ctx,
-                                                ggml_mul(ctx, cur, layer.attn_time_mix_r),
-                                                ggml_mul(ctx, x_prev, ggml_ext_one_minus_x(ctx, layer.attn_time_mix_r)) );
-                // xk = x * time_mix_k + xx * (1 - time_mix_k) "x_key"
-                struct ggml_tensor * x_key = ggml_add_inplace(ctx,
-                                                ggml_mul(ctx, cur, layer.attn_time_mix_k),
-                                                ggml_mul(ctx, x_prev, ggml_ext_one_minus_x(ctx, layer.attn_time_mix_k)) );
-                // xv = x * time_mix_v + xx * (1 - time_mix_v) "x_val"
-                struct ggml_tensor * x_val = ggml_add_inplace(ctx,
-                                                ggml_mul(ctx, cur, layer.attn_time_mix_v),
-                                                ggml_mul(ctx, x_prev, ggml_ext_one_minus_x(ctx, layer.attn_time_mix_v)) );
-                // state[5*i+1] = x.float()
-                x_prev = cur;
-                
-                // ne0[4096, 4096] mm ne1[4096, 1] = [4096, 1] (ne0[1], ne1[1])
-                // r = torch.sigmoid(xr @ rw)
-                struct ggml_tensor * r = ggml_ext_sigmoid(ctx,
-                                            ggml_mul_mat(ctx, layer.attn_r_w, x_rec) );
-                // k = (xk @ kw).float()
-                struct ggml_tensor * k = ggml_mul_mat(ctx, layer.attn_k_w, x_key);
-                // v = (xv @ vw).float()
-                struct ggml_tensor * v = ggml_mul_mat(ctx, layer.attn_v_w, x_val);
-                
-                // Linear attention
-                // Using prev_num and prev_den may be unstable, so a special num and den state are used along with max state
-                // aa = state[5*i+2] "num_state"
-                struct ggml_tensor *& num_state = input_state.num; //ggml_view_1d(ctx, state.num, n_embd, i * n_embd * ggml_element_size(state.num));
-                // bb = state[5*i+3] "den_state"
-                struct ggml_tensor *& den_state = input_state.den; //ggml_view_1d(ctx, state.den, n_embd, i * n_embd * ggml_element_size(state.den));
-                // pp = state[5*i+4] "max_state"
-                struct ggml_tensor *& max_state = input_state.max; //ggml_view_1d(ctx, state.max, n_embd, i * n_embd * ggml_element_size(state.max));
-                
-                // ww = time_first + k "k_time_first"
-                struct ggml_tensor * k_time_first = ggml_add(ctx, layer.attn_time_first, k);
-                // p = torch.maximum(pp, ww) "max_state_k_time_first"
-                struct ggml_tensor * max_state_k_time_first = ggml_ext_max(ctx, max_state, k_time_first);
-                // e1 = torch.exp(pp - p) "exp_prev"
-                struct ggml_tensor * exp_prev = ggml_ext_exp(ctx,
-                                                    ggml_sub(ctx, max_state, max_state_k_time_first) );
-                // e2 = torch.exp(ww - p) "exp_cur"
-                struct ggml_tensor * exp_cur = ggml_ext_exp(ctx,
-                                                    ggml_sub(ctx, k_time_first, max_state_k_time_first) );
-                // a = e1 * aa + e2 * v "num" = (e^-w * prev_num + e^x_key * x_val)
-                struct ggml_tensor * num = ggml_add_inplace(ctx,
-                                                ggml_mul(ctx, exp_prev, num_state),
-                                                ggml_mul(ctx, exp_cur, v) );
-                // b = e1 * bb + e2 "den" = (e^-w * prev_den + e^x_key)
-                struct ggml_tensor * den = ggml_add_inplace(ctx,
-                                                ggml_mul(ctx, exp_prev, den_state),
-                                                exp_cur);
-                // wkv = (a / b)
-                struct ggml_tensor * wkv = ggml_div(ctx, num, den);
-                
-                // ww = pp + time_decay, real time_decay = -exp(time_decay)
-                //struct ggml_tensor * time_decay = ggml_neg(ctx, ggml_ext_exp(ctx, layer.attn_time_decay)); // layer.attn_time_decay
-                struct ggml_tensor * max_state_time_decay = ggml_add(ctx, max_state, layer.attn_time_decay);
-                //struct ggml_tensor * max_state_time_decay = ggml_ext_time_decay(ctx, max_state, layer.attn_time_decay);
-                // p = torch.maximum(ww, k) "new_max_state"
-                struct ggml_tensor * new_max_state = ggml_ext_max(ctx, max_state_time_decay, k);
-                // e1 = torch.exp(ww - p) "exp_prev"
-                exp_prev = ggml_ext_exp(ctx, ggml_sub(ctx, max_state_time_decay, new_max_state) );
-                // e2 = torch.exp(k - p) "exp_cur"
-                exp_cur = ggml_ext_exp(ctx, ggml_sub(ctx, k, new_max_state) );
-                
-                // state[5*i+2] = e1 * aa + e2 * v "num_state"
-                struct ggml_tensor * new_num_state = ggml_add_inplace(ctx,
-                                                        ggml_mul(ctx, exp_prev, num_state),
-                                                        ggml_mul(ctx, exp_cur, v) );
-                num_state = new_num_state;
-                //num_state = ggml_cpy(ctx, new_num_state, num_state);
-                //strcpy(num_state->name, "num state");
-                // state[5*i+3] = e1 * bb + e2 "den_state"
-                struct ggml_tensor * new_den_state = ggml_add_inplace(ctx,
-                                                        ggml_mul(ctx, exp_prev, den_state),
-                                                        exp_cur);
-                den_state = new_den_state;
-                //den_state = ggml_cpy(ctx, new_den_state, den_state);
-                //strcpy(den_state->name, "den state");
-                
-                // state[5*i+4] = p "max_state"
-                max_state = new_max_state;
-                //max_state = ggml_cpy(ctx, new_max_state, max_state);
-                //strcpy(max_state->name, "max state");
-                
-                // return (r * wkv) @ ow
-                struct ggml_tensor * rwkv = ggml_mul(ctx, r, wkv);
-                //strcpy(rwkv->name, "rwkv");
-                cur = ggml_mul_mat(ctx, layer.attn_out_w, rwkv);
-            }
+        // MARK: attention (time mixing)
+        {
+            // Mix current token embedding with the previous timestep to produce key, value, receptance
+            // xx = state[5*i+1]
+            struct ggml_tensor *& x_prev = input_state.attn;
+            // xr = x * time_mix_r + xx * (1 - time_mix_r) "x_rec"
+            struct ggml_tensor * x_rec = ggml_add_inplace(ctx,
+                                            ggml_mul(ctx, cur, layer.attn_time_mix_r),
+                                            ggml_mul(ctx, x_prev, ggml_ext_one_minus_x(ctx, layer.attn_time_mix_r)) );
+            // xk = x * time_mix_k + xx * (1 - time_mix_k) "x_key"
+            struct ggml_tensor * x_key = ggml_add_inplace(ctx,
+                                            ggml_mul(ctx, cur, layer.attn_time_mix_k),
+                                            ggml_mul(ctx, x_prev, ggml_ext_one_minus_x(ctx, layer.attn_time_mix_k)) );
+            // xv = x * time_mix_v + xx * (1 - time_mix_v) "x_val"
+            struct ggml_tensor * x_val = ggml_add_inplace(ctx,
+                                            ggml_mul(ctx, cur, layer.attn_time_mix_v),
+                                            ggml_mul(ctx, x_prev, ggml_ext_one_minus_x(ctx, layer.attn_time_mix_v)) );
+            // state[5*i+1] = x.float()
+            x_prev = cur;
             
-            struct ggml_tensor * outAttn = cur;
-            //strcpy(outAttn->name, "outAttn");
+            // ne0[4096, 4096] mm ne1[4096, 1] = [4096, 1] (ne0[1], ne1[1])
+            // r = torch.sigmoid(xr @ rw)
+            struct ggml_tensor * r = ggml_ext_sigmoid(ctx,
+                                        ggml_mul_mat(ctx, layer.attn_r_w, x_rec) );
+            // k = (xk @ kw).float()
+            struct ggml_tensor * k = ggml_mul_mat(ctx, layer.attn_k_w, x_key);
+            // v = (xv @ vw).float()
+            struct ggml_tensor * v = ggml_mul_mat(ctx, layer.attn_v_w, x_val);
             
-            // MARK: residual 1
-            // x = x + attn(ln1(x))
-            struct ggml_tensor * inpFF = ggml_add_inplace(ctx, outAttn, inpAttn);
-            //strcpy(inpFF->name, "inpFF");
-
-            lctx.use_buf(ctx, 1);
+            // Linear attention
+            // Using prev_num and prev_den may be unstable, so a special num and den state are used along with max state
+            // aa = state[5*i+2] "num_state"
+            struct ggml_tensor *& num_state = input_state.num; //ggml_view_1d(ctx, state.num, n_embd, i * n_embd * ggml_element_size(state.num));
+            // bb = state[5*i+3] "den_state"
+            struct ggml_tensor *& den_state = input_state.den; //ggml_view_1d(ctx, state.den, n_embd, i * n_embd * ggml_element_size(state.den));
+            // pp = state[5*i+4] "max_state"
+            struct ggml_tensor *& max_state = input_state.max; //ggml_view_1d(ctx, state.max, n_embd, i * n_embd * ggml_element_size(state.max));
             
-            // MARK: layer norm 2
-            // cur = ln_2_g * norm(inpFF) + ln_2_b
-            cur = rwkv_layer_norm(ctx, inpFF, layer.ln_2_g, layer.ln_2_b);
-            //strcpy(cur->name, "ln2");
+            // ww = time_first + k "k_time_first"
+            struct ggml_tensor * k_time_first = ggml_add(ctx, layer.attn_time_first, k);
+            // p = torch.maximum(pp, ww) "max_state_k_time_first"
+            struct ggml_tensor * max_state_k_time_first = ggml_ext_max(ctx, max_state, k_time_first);
+            // e1 = torch.exp(pp - p) "exp_prev"
+            struct ggml_tensor * exp_prev = ggml_ext_exp(ctx,
+                                                ggml_sub(ctx, max_state, max_state_k_time_first) );
+            // e2 = torch.exp(ww - p) "exp_cur"
+            struct ggml_tensor * exp_cur = ggml_ext_exp(ctx,
+                                                ggml_sub(ctx, k_time_first, max_state_k_time_first) );
+            // a = e1 * aa + e2 * v "num" = (e^-w * prev_num + e^x_key * x_val)
+            struct ggml_tensor * num = ggml_add_inplace(ctx,
+                                            ggml_mul(ctx, exp_prev, num_state),
+                                            ggml_mul(ctx, exp_cur, v) );
+            // b = e1 * bb + e2 "den" = (e^-w * prev_den + e^x_key)
+            struct ggml_tensor * den = ggml_add_inplace(ctx,
+                                            ggml_mul(ctx, exp_prev, den_state),
+                                            exp_cur);
+            // wkv = (a / b)
+            struct ggml_tensor * wkv = ggml_div(ctx, num, den);
             
-            // MARK: feed-forward network (channel mixing)
-            {
-                // xx = state[5*i+0] "x_prev"
-                struct ggml_tensor *& x_prev = input_state.ff;
-                // xr = x * time_mix_r + xx * (1 - time_mix_r) "x_rec"
-                struct ggml_tensor * x_rec = ggml_add_inplace(ctx,
-                                                ggml_mul(ctx, cur, layer.ff_time_mix_r),
-                                                ggml_mul(ctx, x_prev, ggml_ext_one_minus_x(ctx, layer.ff_time_mix_r)) );
-                // xk = x * time_mix_k + xx * (1 - time_mix_k) "x_key"
-                struct ggml_tensor * x_key = ggml_add_inplace(ctx,
-                                                ggml_mul(ctx, cur, layer.ff_time_mix_k),
-                                                ggml_mul(ctx, x_prev, ggml_ext_one_minus_x(ctx, layer.ff_time_mix_k)) );
-                // state[5*i+0] = x.float()
-                x_prev = cur;
-                
-                // r = torch.sigmoid(xr @ rw), sigmoid used as "forget gate"
-                struct ggml_tensor * r = ggml_ext_sigmoid(ctx,
-                                            ggml_mul_mat(ctx, layer.ff_r_w, x_rec) );
-                //strcpy(r->name, "r");
-                // k = torch.square(torch.relu(xk @ kw)), relu is same as max(0, x)
-                struct ggml_tensor * k = ggml_sqr(ctx,
-                                            ggml_relu(ctx,
-                                                ggml_mul_mat(ctx, layer.ff_k_w, x_key) ) );
-                //strcpy(k->name, "k");
-                // kv = k @ vw
-                struct ggml_tensor * kv = ggml_mul_mat(ctx, layer.ff_v_w, k);
-                //strcpy(kv->name, "kv");
-                
-                // return r * kv
-                cur = ggml_mul(ctx, r, kv);
-            }
+            // ww = pp + time_decay, real time_decay = -exp(time_decay)
+            //struct ggml_tensor * time_decay = ggml_neg(ctx, ggml_ext_exp(ctx, layer.attn_time_decay)); // layer.attn_time_decay
+            struct ggml_tensor * max_state_time_decay = ggml_add(ctx, max_state, layer.attn_time_decay);
+            //struct ggml_tensor * max_state_time_decay = ggml_ext_time_decay(ctx, max_state, layer.attn_time_decay);
+            // p = torch.maximum(ww, k) "new_max_state"
+            struct ggml_tensor * new_max_state = ggml_ext_max(ctx, max_state_time_decay, k);
+            // e1 = torch.exp(ww - p) "exp_prev"
+            exp_prev = ggml_ext_exp(ctx, ggml_sub(ctx, max_state_time_decay, new_max_state) );
+            // e2 = torch.exp(k - p) "exp_cur"
+            exp_cur = ggml_ext_exp(ctx, ggml_sub(ctx, k, new_max_state) );
             
-            struct ggml_tensor * outFF = cur;
-            //strcpy(outFF->name, "outFF");
+            // state[5*i+2] = e1 * aa + e2 * v "num_state"
+            struct ggml_tensor * new_num_state = ggml_add_inplace(ctx,
+                                                    ggml_mul(ctx, exp_prev, num_state),
+                                                    ggml_mul(ctx, exp_cur, v) );
+            num_state = new_num_state;
+            //num_state = ggml_cpy(ctx, new_num_state, num_state);
+            //strcpy(num_state->name, "num state");
+            // state[5*i+3] = e1 * bb + e2 "den_state"
+            struct ggml_tensor * new_den_state = ggml_add_inplace(ctx,
+                                                    ggml_mul(ctx, exp_prev, den_state),
+                                                    exp_cur);
+            den_state = new_den_state;
+            //den_state = ggml_cpy(ctx, new_den_state, den_state);
+            //strcpy(den_state->name, "den state");
             
-            // MARK: residual 2
-            // x = x + ff(ln2(x))
-            inpL = ggml_add_inplace(ctx, outFF, inpFF);
-            //strcpy(inpL->name, "inpL");
+            // state[5*i+4] = p "max_state"
+            max_state = new_max_state;
+            //max_state = ggml_cpy(ctx, new_max_state, max_state);
+            //strcpy(max_state->name, "max state");
             
-            // rescale_every, needed???
-            //if (
-            //    self.layers_are_rescaled
-            //    and self.config.rescale_every > 0
-            //    and (idx + 1) % self.config.rescale_every == 0
-            //):
-            //hidden_states = hidden_states / 2
-            if(rescale_every > 0) {
-                if(((i + 1) % rescale_every) == 0) {
-                    //inpL = ggml_div(ctx, inpL, ggml_repeat(ctx, ggml_new_f32(ctx, 2), inpL));
-                    inpL = ggml_scale(ctx, inpL, ggml_new_f32(ctx, 0.5f) );
-                }
-            }
-            
-            // Update states
-            ggml_build_forward_expand(&lctx.cg, ggml_cpy(ctx, input_state.attn, output_state.attn));
-            ggml_build_forward_expand(&lctx.cg, ggml_cpy(ctx, input_state.num,  output_state.num));
-            ggml_build_forward_expand(&lctx.cg, ggml_cpy(ctx, input_state.den,  output_state.den));
-            ggml_build_forward_expand(&lctx.cg, ggml_cpy(ctx, input_state.max,  output_state.max));
-            ggml_build_forward_expand(&lctx.cg, ggml_cpy(ctx, input_state.ff,   output_state.ff));
+            // return (r * wkv) @ ow
+            struct ggml_tensor * rwkv = ggml_mul(ctx, r, wkv);
+            //strcpy(rwkv->name, "rwkv");
+            cur = ggml_mul_mat(ctx, layer.attn_out_w, rwkv);
         }
         
-        //printf("eval output\n");
-
-        lctx.use_buf(ctx, 0);
-
-        // used at the end to optionally extract the embeddings
-        struct ggml_tensor * embeddings = NULL;
-
-        // layer norm out
-        // x = self.layer_norm(x, self.w.ln_out)
-        inpL = rwkv_layer_norm(ctx, inpL, model.ln_out_g, model.ln_out_b);
-        //embeddings = inpL;
-        //strcpy(inpL->name, "ln_out");
-
-        //printf("eval lm head\n");
+        struct ggml_tensor * outAttn = cur;
+        //strcpy(outAttn->name, "outAttn");
         
-        // lm_head
-        // x = self.w.head.weight @ x
-        inpL = ggml_mul_mat(ctx, model.lmh_w, inpL);
-        //strcpy(inpL->name, "lmh");
+        // MARK: residual 1
+        // x = x + attn(ln1(x))
+        struct ggml_tensor * inpFF = ggml_add_inplace(ctx, outAttn, inpAttn);
+        //strcpy(inpFF->name, "inpFF");
 
-        lctx.use_buf(ctx, -1);
+        lctx.use_buf(ctx, 1);
+        
+        // MARK: layer norm 2
+        // cur = ln_2_g * norm(inpFF) + ln_2_b
+        cur = rwkv_layer_norm(ctx, inpFF, layer.ln_2_g, layer.ln_2_b);
+        //strcpy(cur->name, "ln2");
+        
+        // MARK: feed-forward network (channel mixing)
+        {
+            // xx = state[5*i+0] "x_prev"
+            struct ggml_tensor *& x_prev = input_state.ff;
+            // xr = x * time_mix_r + xx * (1 - time_mix_r) "x_rec"
+            struct ggml_tensor * x_rec = ggml_add_inplace(ctx,
+                                            ggml_mul(ctx, cur, layer.ff_time_mix_r),
+                                            ggml_mul(ctx, x_prev, ggml_ext_one_minus_x(ctx, layer.ff_time_mix_r)) );
+            // xk = x * time_mix_k + xx * (1 - time_mix_k) "x_key"
+            struct ggml_tensor * x_key = ggml_add_inplace(ctx,
+                                            ggml_mul(ctx, cur, layer.ff_time_mix_k),
+                                            ggml_mul(ctx, x_prev, ggml_ext_one_minus_x(ctx, layer.ff_time_mix_k)) );
+            // state[5*i+0] = x.float()
+            x_prev = cur;
+            
+            // r = torch.sigmoid(xr @ rw), sigmoid used as "forget gate"
+            struct ggml_tensor * r = ggml_ext_sigmoid(ctx,
+                                        ggml_mul_mat(ctx, layer.ff_r_w, x_rec) );
+            //strcpy(r->name, "r");
+            // k = torch.square(torch.relu(xk @ kw)), relu is same as max(0, x)
+            struct ggml_tensor * k = ggml_sqr(ctx,
+                                        ggml_relu(ctx,
+                                            ggml_mul_mat(ctx, layer.ff_k_w, x_key) ) );
+            //strcpy(k->name, "k");
+            // kv = k @ vw
+            struct ggml_tensor * kv = ggml_mul_mat(ctx, layer.ff_v_w, k);
+            //strcpy(kv->name, "kv");
+            
+            // return r * kv
+            cur = ggml_mul(ctx, r, kv);
+        }
+        
+        struct ggml_tensor * outFF = cur;
+        //strcpy(outFF->name, "outFF");
+        
+        // MARK: residual 2
+        // x = x + ff(ln2(x))
+        inpL = ggml_add_inplace(ctx, outFF, inpFF);
+        //strcpy(inpL->name, "inpL");
+        
+        // rescale_every, needed???
+        //if (
+        //    self.layers_are_rescaled
+        //    and self.config.rescale_every > 0
+        //    and (idx + 1) % self.config.rescale_every == 0
+        //):
+        //hidden_states = hidden_states / 2
+        if(rescale_every > 0) {
+            if(((i + 1) % rescale_every) == 0) {
+                //inpL = ggml_div(ctx, inpL, ggml_repeat(ctx, ggml_new_f32(ctx, 2), inpL));
+                inpL = ggml_scale(ctx, inpL, ggml_new_f32(ctx, 0.5f) );
+            }
+        }
+        
+        // Update states
+        ggml_build_forward_expand(&lctx.cg, ggml_cpy(ctx, input_state.attn, output_state.attn));
+        ggml_build_forward_expand(&lctx.cg, ggml_cpy(ctx, input_state.num,  output_state.num));
+        ggml_build_forward_expand(&lctx.cg, ggml_cpy(ctx, input_state.den,  output_state.den));
+        ggml_build_forward_expand(&lctx.cg, ggml_cpy(ctx, input_state.max,  output_state.max));
+        ggml_build_forward_expand(&lctx.cg, ggml_cpy(ctx, input_state.ff,   output_state.ff));
+    }
+    
+    //printf("eval output\n");
 
-        // logits -> probs
-        //inpL = ggml_soft_max(ctx, inpL);
+    lctx.use_buf(ctx, 0);
 
-        // Build head
-        //ggml_build_forward_expand(&cg, inpL);
-        ggml_build_forward_expand(&lctx.cg, ggml_cpy(ctx, inpL, state.logits));
+    // used at the end to optionally extract the embeddings
+    struct ggml_tensor * embeddings = NULL;
+
+    // layer norm out
+    // x = self.layer_norm(x, self.w.ln_out)
+    inpL = rwkv_layer_norm(ctx, inpL, model.ln_out_g, model.ln_out_b);
+    //embeddings = inpL;
+    //strcpy(inpL->name, "ln_out");
+
+    //printf("eval lm head\n");
+    
+    // lm_head
+    // x = self.w.head.weight @ x
+    inpL = ggml_mul_mat(ctx, model.lmh_w, inpL);
+    //strcpy(inpL->name, "lmh");
+
+    lctx.use_buf(ctx, -1);
+
+    // logits -> probs (needed for optimization to compared one-hot to)
+    inpL = ggml_soft_max(ctx, inpL);
+
+    // Build head
+    //ggml_build_forward_expand(&cg, inpL);
+    ggml_build_forward_expand(&lctx.cg, ggml_cpy(ctx, inpL, state.logits));
+    
+    lctx.ctx = ctx;
+    return inpL; // ctx;
+}
+
+// evaluate the transformer
+//
+//   - lctx:      rwkv context
+//   - token:     new token to process
+//
+static bool rwkv_eval_internal(struct rwkv_context & lctx,
+                               const rwkv_token      token,
+                               const char *          dot_path) {
+    const int64_t t_start_us = ggml_time_us();
+    
+    auto & model = lctx.model;
+    auto & state = model.state;
+    
+    auto & mem_per_token = lctx.mem_per_token;
+
+    // Create context and graph
+    struct ggml_context * ctx = lctx.ctx;
+    if (ctx == NULL) {
+        rwkv_build_graph(lctx);
+        ctx = lctx.ctx;
     }
 
     // Debug dump dot digraph of model
@@ -1656,6 +1752,115 @@ static bool rwkv_eval_internal(struct rwkv_context & lctx,
     // measure the performance only for the single-token evals
     lctx.t_eval_us += ggml_time_us() - t_start_us;
     lctx.n_eval++;
+    
+    //printf("eval complete %d\n", lctx.n_eval);
+
+    return true;
+}
+
+// optimize the transformer
+//
+//   - lctx:      rwkv context
+//   - token:     new token to process
+//   - actual:    expected/actual output token
+//
+static bool rwkv_opt_internal(struct rwkv_context & lctx,
+                               const rwkv_token      token,
+                               const rwkv_token      actual,
+                               const char *          dot_path) {
+    const int64_t t_start_us = ggml_time_us();
+    
+    auto & model   = lctx.model;
+    auto & state = model.state;
+    
+    auto & mem_per_token = lctx.mem_per_token;
+    
+    // Set params for grad if needed
+    if (model.wte->grad == NULL) {
+        rwkv_model_set_param(lctx);
+    }
+
+    // Create context and graph
+    struct ggml_context * ctx = lctx.ctx;
+    //if (ctx == NULL) {
+        struct ggml_tensor * logits = rwkv_build_graph(lctx);
+        ctx = lctx.ctx;
+        
+        // Loss
+        struct ggml_tensor * errors = rwkv_squared_error_loss(ctx, state.targets, logits);
+        ggml_build_forward_expand(&lctx.cg, errors); //ggml_cpy(ctx, errors, state.errors));
+    //}
+
+    // Debug dump dot digraph of model
+    //if(dot_path != NULL) ggml_graph_dump_dot(&cg, NULL, dot_path);
+    
+    // Copy previous output_state to input_state
+    memcpy(state.input_state->data, state.output_state->data, ggml_nbytes(state.input_state));
+    
+    // Set current token
+    ggml_set_i32(state.token, token);
+    
+    // Set actual targets (one hot)
+    ggml_set_zero(state.targets);
+    ggml_set_f32_1d(state.targets, actual, 1.0);
+    
+    // Compute the graph
+    ggml_graph_compute(ctx, &lctx.cg);
+    
+    // Optimize
+    float logit = ggml_get_f32_1d(state.logits, actual);
+    state.error_before = ggml_get_f32_1d(errors, actual);
+    float error_before_sqrt = sqrtf(state.error_before);
+    printf("logit=%f error=%f\n", logit, error_before_sqrt);
+    {
+        //struct ggml_opt_params opt_params_adam = ggml_opt_default_params(GGML_OPT_ADAM);
+        struct ggml_opt_params opt_params_lbfgs = ggml_opt_default_params(GGML_OPT_LBFGS);
+        
+        //opt_params_adam.print_forward_graph = false;
+        //opt_params_adam.print_backward_graph = false;
+        
+        opt_params_lbfgs.print_forward_graph = false;
+        opt_params_lbfgs.print_backward_graph = false;
+        
+        //opt_params_adam.adam.n_iter = 16;
+        opt_params_lbfgs.lbfgs.n_iter = 16;
+        
+        // ggml_opt(ctx0, opt_params_adam, e);
+        ggml_opt(ctx, opt_params_lbfgs, errors);
+        
+        //ggml_build_forward_expand(&lctx.cg, e);
+        ggml_graph_compute(ctx, &lctx.cg);
+    }
+    state.error_after = ggml_get_f32_1d(state.errors, actual);
+    // Debug optimize
+    printf("Optimize %d\n", actual);
+    printf("error_before_opt: %.2f\n", state.error_before);
+    printf("error_after_opt:  %.2f\n", state.error_after);
+
+//#define GGML_PERF
+#ifdef GGML_PERF
+    // print timing information per ggml operation (for debugging purposes)
+    // requires GGML_PERF to be defined
+    ggml_graph_print(&lctx.cg);
+#endif
+
+    if (mem_per_token == 0) {
+        mem_per_token = ggml_used_mem(ctx);
+    }
+
+#if 0
+    printf("\n%s: used_mem = %.3f MiB, scratch -- %.3f MiB %.3f MiB\n", __func__,
+            ggml_used_mem(ctx)/1024.0/1024.0,
+            lctx.get_buf_max_mem(0)/1024.0/1024.0,
+            lctx.get_buf_max_mem(1)/1024.0/1024.0);
+#endif
+
+    // measure the performance only for the single-token evals
+    lctx.t_eval_us += ggml_time_us() - t_start_us;
+    lctx.n_eval++;
+    
+    ggml_free(ctx);
+    lctx.ctx = NULL;
     
     //printf("eval complete %d\n", lctx.n_eval);
 
@@ -3086,6 +3291,22 @@ int rwkv_eval(struct rwkv_context * ctx,
     return 0;
 }
 
+int rwkv_opt(struct rwkv_context * ctx,
+                const rwkv_token   token,
+                const rwkv_token   actual,
+                      const char * dot_path) {
+    if (!rwkv_opt_internal(*ctx, token, actual, dot_path)) {
+        fprintf(stderr, "%s: failed to eval\n", __func__);
+        return 1;
+    }
+    // get a more accurate load time, upon first eval
+    if (!ctx->has_evaluated_once) {
+        ctx->t_load_us = ggml_time_us() - ctx->t_start_us;
+        ctx->has_evaluated_once = true;
+    }
+    return 0;
+}
+
 int rwkv_tokenize(
         struct rwkv_context * ctx,
                   const char * text,
@@ -3121,6 +3342,14 @@ int rwkv_n_embd(struct rwkv_context * ctx) {
 float * rwkv_get_logits(struct rwkv_context * ctx) {
     return (float *)(ctx->model.state.logits->data);
     //return ctx->logits.data();
+}
+
+float rwkv_get_error_before(struct rwkv_context * ctx) {
+    return ctx->model.state.error_before;
+}
+
+float rwkv_get_error_after(struct rwkv_context * ctx) {
+    return ctx->model.state.error_after;
 }
 
 float * rwkv_get_embeddings(struct rwkv_context * ctx) {

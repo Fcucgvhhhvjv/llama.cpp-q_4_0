@@ -307,6 +307,7 @@ extern "C" {
         GGML_OP_SILU,
         GGML_OP_SILU_BACK,
         GGML_OP_NORM, // normalize
+        //GGML_OP_NORM_BACK,
         GGML_OP_RMS_NORM,
         GGML_OP_RMS_NORM_BACK,
         
