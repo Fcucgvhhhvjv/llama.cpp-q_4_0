@@ -5,21 +5,21 @@ cd `dirname $0`
 
 # download model to models dir
 echo "Downloading model"
-python ./convert-gptneox-to-ggml.py OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5 ../models/pythia
+python ./convert-gptneox-to-ggml.py OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5 ../../models/pythia
 
 # remove temp cache dir
 echo "Removing temp cache dir"
-rm -r ../models/pythia-cache
+rm -r ../../models/pythia-cache
 
 # quantize model
 echo "Quantizing model"
-cd ..
-python ./scripts/quantize-gptneox.py ./models/pythia/ggml-oasst-sft-4-pythia-12b-epoch-3.5-f16.bin
+cd ../..
+python ./scripts/gptneox/quantize-gptneox.py ./models/pythia/ggml-oasst-sft-4-pythia-12b-epoch-3.5-f16.bin
 
 # remove non-quantized model
-echo "Remove non-quantized model"
-rm ./models/pythia/ggml-oasst-sft-4-pythia-12b-epoch-3.5-f16.bin
+#echo "Remove non-quantized model"
+#rm ./models/pythia/ggml-oasst-sft-4-pythia-12b-epoch-3.5-f16.bin
 
 # done!
-cd scripts
+cd ./scripts/gptneox
 echo "Done. Run 'chat-pythia-12B.sh' to test model."

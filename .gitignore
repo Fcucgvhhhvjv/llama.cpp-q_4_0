@@ -32,13 +32,16 @@ models/*
 /main-gptneox
 /main-oasst
 /main-rwkv
+/main-falcon
 /quantize
 /quantize-gptneox
 /quantize-rwkv
+/quantize-falcon
 /quantize-stats
 /update-llama
 /update-gptneox
 /update-rwkv
+/update-falcon
 /result
 /perplexity
 /embedding

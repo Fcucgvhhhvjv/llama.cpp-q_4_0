@@ -1,5 +1,5 @@
 # Define the default target now so that it is always the first target
-BUILD_TARGETS = main main-gptneox main-oasst main-rwkv quantize quantize-gptneox quantize-rwkv quantize-stats update-llama update-gptneox update-rwkv perplexity embedding vdot train-text-from-scratch simple libembdinput.so embd-input-test
+BUILD_TARGETS = main main-gptneox main-oasst main-rwkv main-falcon quantize quantize-gptneox quantize-rwkv quantize-falcon quantize-stats update-llama update-gptneox update-rwkv update-falcon perplexity embedding vdot train-text-from-scratch simple libembdinput.so embd-input-test
 
 ifdef LLAMA_BUILD_SERVER
 	BUILD_TARGETS += server
@@ -265,10 +265,13 @@ ggml.o: ggml.c ggml.h ggml-cuda.h
 llama.o: llama.cpp ggml.h ggml-cuda.h ggml-metal.h llama.h llama-util.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 	
-gptneox.o: arch/gptneox/gptneox.cpp ggml.h arch/gptneox/gptneox.h arch/gptneox/gptneox-util.h
+gptneox.o: arch/gptneox/gptneox.cpp ggml.h arch/gptneox/gptneox.h arch/arch-util.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 	
 rwkv.o: arch/rwkv/rwkv.cpp ggml.h arch/rwkv/rwkv.h arch/arch-util.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+	
+falcon.o: arch/falcon/falcon.cpp ggml.h arch/falcon/falcon.h arch/arch-util.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 common.o: examples/common.cpp examples/common.h
@@ -280,11 +283,14 @@ common-gptneox.o: arch/gptneox/common-gptneox.cpp arch/gptneox/common-gptneox.h
 common-rwkv.o: arch/rwkv/common-rwkv.cpp arch/rwkv/common-rwkv.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 	
+common-falcon.o: arch/falcon/common-falcon.cpp arch/falcon/common-falcon.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+	
 libllama.so: llama.o ggml.o $(OBJS)
 	$(CXX) $(CXXFLAGS) -shared -fPIC -o $@ $^ $(LDFLAGS)
 
 clean:
-	rm -vf *.o *.so main main-oasst main-gptneox main-rwkv quantize quantize-gptneox quantize-rwkv quantize-stats update-llama update-gptneox update-rwkv perplexity embedding benchmark-matmult save-load-state server vdot train-text-from-scratch embd-input-test build-info.h
+	rm -vf *.o *.so main main-oasst main-gptneox main-rwkv main-falcon quantize quantize-gptneox quantize-rwkv quantize-falcon quantize-stats update-llama update-gptneox update-rwkv update-falcon perplexity embedding benchmark-matmult save-load-state server vdot train-text-from-scratch embd-input-test build-info.h
 
 #
 # Examples
@@ -314,6 +320,12 @@ main-rwkv: arch/rwkv/main-rwkv.cpp build-info.h ggml.o rwkv.o common-rwkv.o $(OB
 	@echo '====  Run ./main -h for help.  ===='
 	@echo
 
+main-falcon: arch/falcon/main-falcon.cpp build-info.h ggml.o falcon.o common-falcon.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
+	@echo
+	@echo '====  Run ./main -h for help.  ===='
+	@echo
+
 simple: examples/simple/simple.cpp                            build-info.h ggml.o llama.o common.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 	
@@ -321,6 +333,9 @@ quantize-gptneox: arch/gptneox/quantize-gptneox.cpp build-info.h ggml.o gptneox.
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 	
 quantize-rwkv: arch/rwkv/quantize-rwkv.cpp build-info.h ggml.o rwkv.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
+	
+quantize-falcon: arch/falcon/quantize-falcon.cpp build-info.h ggml.o falcon.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 
 quantize: examples/quantize/quantize.cpp                      build-info.h ggml.o llama.o $(OBJS)
@@ -336,6 +351,9 @@ update-gptneox: arch/gptneox/update-gptneox.cpp build-info.h ggml.o gptneox.o $(
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 
 update-rwkv: arch/rwkv/update-rwkv.cpp build-info.h ggml.o rwkv.o $(OBJS)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
+	
+update-falcon: arch/falcon/update-falcon.cpp build-info.h ggml.o falcon.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 
 perplexity: examples/perplexity/perplexity.cpp                build-info.h ggml.o llama.o common.o $(OBJS)

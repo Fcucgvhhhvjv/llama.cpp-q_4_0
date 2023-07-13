@@ -6,7 +6,7 @@
 #endif
 
 #include "../arch-util.h"
-#include "gptneox.h"
+#include "falcon.h"
 
 #include "../ggml.h"
 
@@ -29,10 +29,10 @@
 #include <mutex>
 #include <sstream>
 
-#define GPTNEOX_USE_SCRATCH
-#define GPTNEOX_MAX_SCRATCH_BUFFERS 16
+#define FALCON_USE_SCRATCH
+#define FALCON_MAX_SCRATCH_BUFFERS 16
 
-// available open-assistant based gptneox models
+// available open-assistant based falcon models
 // OpenAssistant/stablelm-7b-sft-v7-epoch-3
 // OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5
 enum e_model {
@@ -50,7 +50,7 @@ static const size_t MiB = 1024*1024;
 // TODO: To load the stablelm 3B model on my test XR will require some tricks, small ggml context size, mmap support, among others, but is maybe feasible, is a smaller n_ctx required? 512 instead of 2048/4096? Does mmap work as desired on iOS?
 //       needs modifications in ggml
 
-// TODO: Modify for gptneox, how are these values actually determined?
+// TODO: Modify for falcon, how are these values actually determined?
 // TODO: This is now priority, 
 static const std::map<e_model, size_t> & MEM_REQ_SCRATCH0()
 {
@@ -63,7 +63,7 @@ static const std::map<e_model, size_t> & MEM_REQ_SCRATCH0()
     return _MEM_REQ_SCRATCH0;
 }
 
-// TODO: Modify for gptneox, how are these values actually determined?
+// TODO: Modify for falcon, how are these values actually determined?
 static const std::map<e_model, size_t> & MEM_REQ_SCRATCH1()
 {
     static std::map<e_model, size_t> _MEM_REQ_SCRATCH1 = {
@@ -75,7 +75,7 @@ static const std::map<e_model, size_t> & MEM_REQ_SCRATCH1()
     return _MEM_REQ_SCRATCH1;
 }
 
-// TODO: Modify for gptneox, how are these values actually determined?
+// TODO: Modify for falcon, how are these values actually determined?
 // 2*n_embd*n_ctx*n_layer*sizeof(float16)
 // llama 7B: 2 * 768 * 32 * 2 = 98304
 static const std::map<e_model, size_t> & MEM_REQ_KV_SELF()
@@ -89,14 +89,14 @@ static const std::map<e_model, size_t> & MEM_REQ_KV_SELF()
     return _MEM_REQ_KV_SELF;
 }
 
-// TODO: Modify for gptneox, how are these values actually determined?
+// TODO: Modify for falcon, how are these values actually determined?
 // this is mostly needed for temporary mul_mat buffers to dequantize the data
 // not actually needed if BLAS is disabled
 static const std::map<e_model, size_t> & MEM_REQ_EVAL()
 {
     static std::map<e_model, size_t> _MEM_REQ_EVAL = {
         { MODEL_3B,   512ull * MiB },
-        { MODEL_7B,   768ull * MiB },
+        { MODEL_7B,  1608ull * MiB },
         { MODEL_12B, 1024ull * MiB },
         { MODEL_20B, 1024ull * MiB },
     };
@@ -104,47 +104,44 @@ static const std::map<e_model, size_t> & MEM_REQ_EVAL()
 }
 
 // default hparams (GPT-NeoX oasst 12B)
-struct gptneox_hparams {
+struct falcon_hparams {
     uint32_t n_vocab = 50288;
-    uint32_t n_ctx   = 4096;   // this is provided as user input?
+    uint32_t n_ctx   = 2048;   // Hard-coded max sequence length
     uint32_t n_embd  = 5120;
     uint32_t n_head  = 40;
     uint32_t n_layer = 36;
-    uint32_t n_rot   = 32;
-    uint32_t use_parallel_residual = 1; // 1 = true, 0 = false
-    enum gptneox_ftype ftype = GPTNEOX_FTYPE_MOSTLY_F16;
+    //uint32_t n_rot   = 32;
+    uint32_t parallel_attn = 1; // 1 = true, 0 = false
+    enum falcon_ftype ftype = FALCON_FTYPE_MOSTLY_F16;
 
-    bool operator!=(const gptneox_hparams & other) const {
-        return memcmp(this, &other, sizeof(gptneox_hparams));
+    bool operator!=(const falcon_hparams & other) const {
+        return memcmp(this, &other, sizeof(falcon_hparams));
     }
 };
 
-struct gptneox_layer {
+struct falcon_layer {
     // input_layernorm
-    struct ggml_tensor * ln_attn_g;
-    struct ggml_tensor * ln_attn_b;
-
-    // post_attention_layernorm
-    struct ggml_tensor * ln_ff_g;
-    struct ggml_tensor * ln_ff_b;
+    struct ggml_tensor * ln_pre_g;
+    struct ggml_tensor * ln_pre_b;
 
     // attention
-    struct ggml_tensor * c_attn_attn_w;
-
-    struct ggml_tensor * c_attn_attn_b;
-
-    struct ggml_tensor * c_attn_proj_w;
-    struct ggml_tensor * c_attn_proj_b;
+    struct ggml_tensor * attn_qkv_w;
+    //struct ggml_tensor * attn_qkv_b;
+    struct ggml_tensor * attn_proj_w;
+    //struct ggml_tensor * attn_proj_b;
+    
+    // post_attn_layernorm
+    struct ggml_tensor * ln_post_g;
+    struct ggml_tensor * ln_post_b;
 
     // ff
-    struct ggml_tensor * c_mlp_fc_w;
-    struct ggml_tensor * c_mlp_fc_b;
-
-    struct ggml_tensor * c_mlp_proj_w;
-    struct ggml_tensor * c_mlp_proj_b;
+    struct ggml_tensor * mlp_fc_w;
+    //struct ggml_tensor * mlp_fc_b;
+    struct ggml_tensor * mlp_proj_w;
+    //struct ggml_tensor * mlp_proj_b;
 };
 
-struct gptneox_kv_cache {
+struct falcon_kv_cache {
     struct ggml_tensor * k;
     struct ggml_tensor * v;
 
@@ -154,36 +151,36 @@ struct gptneox_kv_cache {
 
     int n; // number of tokens currently in the cache
 
-    ~gptneox_kv_cache() {
+    ~falcon_kv_cache() {
         if (ctx) {
             ggml_free(ctx);
         }
     }
 };
 
-struct gptneox_model {
+struct falcon_model {
     e_model type = MODEL_UNKNOWN;
 
-    gptneox_hparams hparams;
+    falcon_hparams hparams;
 
+    // word embedding
+    struct ggml_tensor * wte;
+    
     // final normalization
     struct ggml_tensor * ln_f_g;
     struct ggml_tensor * ln_f_b;
 
-    // word embedding
-    struct ggml_tensor * wte;
-
     // language model head
-    struct ggml_tensor * lmh_g;
+    struct ggml_tensor * lmh_w;
 
-    std::vector<gptneox_layer> layers;
+    std::vector<falcon_layer> layers;
 
     // context
     struct ggml_context * ctx = NULL;
 
     // key + value cache for the self attention
-    // TODO: move to gptneox_state
-    struct gptneox_kv_cache kv_self;
+    // TODO: move to falcon_state
+    struct falcon_kv_cache kv_self;
 
     // the model memory buffer
     arch_util_buffer buf;
@@ -198,14 +195,14 @@ struct gptneox_model {
     // for quantize-stats only
     std::vector<std::pair<std::string, struct ggml_tensor *>> tensors_by_name;
 
-    ~gptneox_model() {
+    ~falcon_model() {
         if (ctx) {
             ggml_free(ctx);
         }
     }
 };
 
-struct gptneox_vocab {
+struct falcon_vocab {
     using id    = int32_t;
     using token = std::string;
 
@@ -218,7 +215,7 @@ struct gptneox_vocab {
     std::vector<token_score> id_to_token;
 };
 
-struct gptneox_context {
+struct falcon_context {
     std::mt19937 rng;
 
     int64_t t_load_us = 0;
@@ -233,8 +230,8 @@ struct gptneox_context {
     int32_t n_eval   = 0; // number of eval calls
     int32_t n_p_eval = 0; // number of tokens in eval calls for the prompt (with batch size > 1)
 
-    gptneox_model model;
-    gptneox_vocab vocab;
+    falcon_model model;
+    falcon_vocab vocab;
 
     size_t mem_per_token = 0;
 
@@ -246,15 +243,15 @@ struct gptneox_context {
     std::vector<float> embedding;
 
     // memory buffers used to evaluate the model
-    // TODO: move in gptneox_state
+    // TODO: move in falcon_state
     arch_util_buffer buf_compute;
-    arch_util_buffer buf_scratch[GPTNEOX_MAX_SCRATCH_BUFFERS];
+    arch_util_buffer buf_scratch[FALCON_MAX_SCRATCH_BUFFERS];
 
     int    buf_last = 0;
-    size_t buf_max_size[GPTNEOX_MAX_SCRATCH_BUFFERS] = { 0 };
+    size_t buf_max_size[FALCON_MAX_SCRATCH_BUFFERS] = { 0 };
 
     void use_buf(struct ggml_context * ctx, int i) {
-#if defined(GPTNEOX_USE_SCRATCH)
+#if defined(FALCON_USE_SCRATCH)
         size_t last_size = 0;
 
         if (i == -1) {
@@ -276,7 +273,7 @@ struct gptneox_context {
     }
 
     size_t get_buf_max_mem(int i) const {
-#if defined(GPTNEOX_USE_SCRATCH)
+#if defined(FALCON_USE_SCRATCH)
         return buf_max_size[i];
 #else
         (void) i;
@@ -302,7 +299,7 @@ static size_t checked_div(size_t a, size_t b) {
     return a / b;
 }
 
-static std::string gptneox_format_tensor_shape(const std::vector<uint32_t> & ne) {
+static std::string falcon_format_tensor_shape(const std::vector<uint32_t> & ne) {
     char buf[256];
     snprintf(buf, sizeof(buf), "%5u", ne.at(0));
     for (size_t i = 1; i < ne.size(); i++) {
@@ -311,7 +308,7 @@ static std::string gptneox_format_tensor_shape(const std::vector<uint32_t> & ne)
     return buf;
 }
 
-static size_t gptneox_calc_tensor_size(const std::vector<uint32_t> & ne, enum ggml_type type) {
+static size_t falcon_calc_tensor_size(const std::vector<uint32_t> & ne, enum ggml_type type) {
     size_t size = ggml_type_size(type);
     for (uint32_t dim : ne) {
         size = checked_mul<size_t>(size, dim);
@@ -319,7 +316,7 @@ static size_t gptneox_calc_tensor_size(const std::vector<uint32_t> & ne, enum gg
     return size / ggml_blck_size(type);
 }
 
-struct gptneox_load_tensor_shard {
+struct falcon_load_tensor_shard {
     std::vector<uint32_t> ne;
     size_t size;
     enum ggml_type type;
@@ -327,28 +324,28 @@ struct gptneox_load_tensor_shard {
     size_t file_off;
 
     void calc_size() {
-        size = gptneox_calc_tensor_size(ne, type);
+        size = falcon_calc_tensor_size(ne, type);
     }
 };
 
-enum gptneox_split_type {
+enum falcon_split_type {
     SPLIT_NONE,
     SPLIT_BY_COLUMNS,
     SPLIT_BY_ROWS
 };
 
-struct gptneox_load_tensor {
-    std::vector<gptneox_load_tensor_shard> shards;
+struct falcon_load_tensor {
+    std::vector<falcon_load_tensor_shard> shards;
 
     std::string name;
     enum ggml_type type = GGML_TYPE_F32;
-    gptneox_split_type split_type = SPLIT_NONE;
+    falcon_split_type split_type = SPLIT_NONE;
     std::vector<uint32_t> ne;
     size_t size;
     struct ggml_tensor * ggml_tensor = NULL;
     uint8_t * data;
 
-    gptneox_load_tensor(const std::string & name) : name(name) {}
+    falcon_load_tensor(const std::string & name) : name(name) {}
 
     void calc_all() {
         calc_type();
@@ -385,7 +382,7 @@ struct gptneox_load_tensor {
         for (const auto & shard : shards) {
             if (shard.ne != first_shard.ne) {
                 throw format("inconsistent tensor shard shape in '%s': first was %s, other was %s",
-                             name.c_str(), gptneox_format_tensor_shape(first_shard.ne).c_str(), gptneox_format_tensor_shape(shard.ne).c_str());
+                             name.c_str(), falcon_format_tensor_shape(first_shard.ne).c_str(), falcon_format_tensor_shape(shard.ne).c_str());
             }
         }
         ne = first_shard.ne;
@@ -407,31 +404,31 @@ struct gptneox_load_tensor {
     }
 
     void calc_size() {
-        size = gptneox_calc_tensor_size(ne, type);
+        size = falcon_calc_tensor_size(ne, type);
     }
 };
 
-struct gptneox_load_tensors_map {
+struct falcon_load_tensors_map {
     // tensors is kept in a separate vector to preserve file order
-    std::vector<gptneox_load_tensor> tensors;
+    std::vector<falcon_load_tensor> tensors;
     std::unordered_map<std::string, size_t> name_to_idx;
 };
 
-enum arch_util_file_version {
-    GPTNEOX_FILE_VERSION_GGML,
-    GPTNEOX_FILE_VERSION_GGMF_V1, // added version field and scores in vocab
-    GPTNEOX_FILE_VERSION_GGJT_V1, // added padding
+enum falcon_file_version {
+    FALCON_FILE_VERSION_GGML,
+    FALCON_FILE_VERSION_GGMF_V1, // added version field and scores in vocab
+    FALCON_FILE_VERSION_GGJT_V1, // added padding
 };
 
-struct arch_util_file_loader {
+struct falcon_file_loader {
     arch_util_file file;
-    arch_util_file_version file_version;
-    gptneox_hparams hparams;
-    gptneox_vocab vocab;
+    falcon_file_version file_version;
+    falcon_hparams hparams;
+    falcon_vocab vocab;
 
-    arch_util_file_loader(const char * fname, size_t file_idx, gptneox_load_tensors_map & tensors_map)
+    falcon_file_loader(const char * fname, size_t file_idx, falcon_load_tensors_map & tensors_map)
         : file(fname, "rb") {
-        fprintf(stderr, "gptneox.cpp: loading model from %s\n", fname);
+        fprintf(stderr, "falcon.cpp: loading model from %s\n", fname);
         read_magic();
         read_hparams();
         read_vocab();
@@ -446,11 +443,11 @@ struct arch_util_file_loader {
         }
 
         if (magic == 'ggml' && version == 0) {
-            file_version = GPTNEOX_FILE_VERSION_GGML;
+            file_version = FALCON_FILE_VERSION_GGML;
         } else if (magic == 'ggmf' && version == 1) {
-            file_version = GPTNEOX_FILE_VERSION_GGMF_V1;
+            file_version = FALCON_FILE_VERSION_GGMF_V1;
         } else if (magic == 'ggjt' && version == 1) {
-            file_version = GPTNEOX_FILE_VERSION_GGJT_V1;
+            file_version = FALCON_FILE_VERSION_GGJT_V1;
         } else {
             throw format("unknown (magic, version) combination: %08x, %08x; is this really a GGML file?",
                          magic, version);
@@ -458,13 +455,13 @@ struct arch_util_file_loader {
     }
     void read_hparams() {
         hparams.n_vocab = file.read_u32();
-        hparams.n_ctx = file.read_u32();
+        //hparams.n_ctx = file.read_u32();
         hparams.n_embd = file.read_u32();
         hparams.n_head = file.read_u32();
         hparams.n_layer = file.read_u32();
-        hparams.n_rot = file.read_u32();
-        hparams.use_parallel_residual = file.read_u32();
-        hparams.ftype = (enum gptneox_ftype) file.read_u32();
+        //hparams.n_rot = file.read_u32();
+        hparams.parallel_attn = file.read_u32();
+        hparams.ftype = (enum falcon_ftype) file.read_u32();
     }
     void read_vocab() {
         vocab.id_to_token.resize(hparams.n_vocab);
@@ -474,7 +471,7 @@ struct arch_util_file_loader {
             std::string word = file.read_string(len);
 
             float score = 0.0f;
-            if (file_version >= GPTNEOX_FILE_VERSION_GGMF_V1) {
+            if (file_version >= FALCON_FILE_VERSION_GGMF_V1) {
                 file.read_raw(&score, sizeof(score));
             }
 
@@ -485,9 +482,9 @@ struct arch_util_file_loader {
             tok_score.score = score;
         }
     }
-    void read_tensor_metadata(size_t file_idx, gptneox_load_tensors_map & tensors_map) {
+    void read_tensor_metadata(size_t file_idx, falcon_load_tensors_map & tensors_map) {
         while (file.tell() < file.size) {
-            gptneox_load_tensor_shard shard;
+            falcon_load_tensor_shard shard;
             uint32_t n_dims = file.read_u32();
             uint32_t name_len = file.read_u32();
             shard.type = (enum ggml_type) file.read_u32();
@@ -495,7 +492,7 @@ struct arch_util_file_loader {
             file.read_raw(shard.ne.data(), sizeof(shard.ne[0]) * n_dims);
             std::string name = file.read_string(name_len);
             if (n_dims < 1 || n_dims > 2) {
-                throw format("gptneox.cpp: tensor '%s' should not be %u-dimensional", name.c_str(), n_dims);
+                throw format("falcon.cpp: tensor '%s' should not be %u-dimensional", name.c_str(), n_dims);
             }
             switch (shard.type) {
                 case GGML_TYPE_F32:
@@ -511,7 +508,7 @@ struct arch_util_file_loader {
                 }
             }
 
-            if (file_version >= GPTNEOX_FILE_VERSION_GGJT_V1) {
+            if (file_version >= FALCON_FILE_VERSION_GGJT_V1) {
                 // skip to the next multiple of 32 bytes
                 file.seek(-file.tell() & 31, SEEK_CUR);
             }
@@ -537,10 +534,10 @@ struct arch_util_file_loader {
 
 struct arch_util_file_saver {
     arch_util_file file;
-    arch_util_file_loader * any_file_loader;
-    arch_util_file_saver(const char * fname, arch_util_file_loader * any_file_loader, enum gptneox_ftype new_ftype)
+    falcon_file_loader * any_file_loader;
+    arch_util_file_saver(const char * fname, falcon_file_loader * any_file_loader, enum falcon_ftype new_ftype)
         : file(fname, "wb"), any_file_loader(any_file_loader) {
-        fprintf(stderr, "gptneox.cpp: saving model to %s\n", fname);
+        fprintf(stderr, "falcon.cpp: saving model to %s\n", fname);
         write_magic();
         write_hparams(new_ftype);
         write_vocab();
@@ -549,20 +546,20 @@ struct arch_util_file_saver {
         file.write_u32('ggjt'); // magic
         file.write_u32(1); // version
     }
-    void write_hparams(enum gptneox_ftype new_ftype) {
-        const gptneox_hparams & hparams = any_file_loader->hparams;
+    void write_hparams(enum falcon_ftype new_ftype) {
+        const falcon_hparams & hparams = any_file_loader->hparams;
         file.write_u32(hparams.n_vocab);
-        file.write_u32(hparams.n_ctx);
+        //file.write_u32(hparams.n_ctx);
         file.write_u32(hparams.n_embd);
         file.write_u32(hparams.n_head);
         file.write_u32(hparams.n_layer);
-        file.write_u32(hparams.n_rot);
-        file.write_u32(hparams.use_parallel_residual);
+        //file.write_u32(hparams.n_rot);
+        file.write_u32(hparams.parallel_attn);
         file.write_u32(new_ftype);
     }
     void write_vocab() {
-        if (any_file_loader->file_version == GPTNEOX_FILE_VERSION_GGML) {
-            fprintf(stderr, "gptneox.cpp: WARNING: input is an old file that doesn't have scores; will add dummy scores\n");
+        if (any_file_loader->file_version == FALCON_FILE_VERSION_GGML) {
+            fprintf(stderr, "falcon.cpp: WARNING: input is an old file that doesn't have scores; will add dummy scores\n");
         }
         uint32_t n_vocab = any_file_loader->hparams.n_vocab;
         for (uint32_t i = 0; i < n_vocab; i++) {
@@ -572,7 +569,7 @@ struct arch_util_file_saver {
             file.write_raw(&token_score.score, sizeof(token_score.score));
         }
     }
-    void write_tensor(gptneox_load_tensor & tensor, enum ggml_type new_type, const void * new_data, size_t new_size) {
+    void write_tensor(falcon_load_tensor & tensor, enum ggml_type new_type, const void * new_data, size_t new_size) {
         switch (new_type) {
             case GGML_TYPE_F32:
             case GGML_TYPE_F16:
@@ -590,47 +587,47 @@ struct arch_util_file_saver {
         file.write_raw(tensor.ne.data(), sizeof(tensor.ne[0]) * tensor.ne.size());
         file.write_raw(tensor.name.data(), tensor.name.size());
         file.seek(-file.tell() & 31, SEEK_CUR);
-        ARCH_ASSERT(new_size == gptneox_calc_tensor_size(tensor.ne, new_type));
+        ARCH_ASSERT(new_size == falcon_calc_tensor_size(tensor.ne, new_type));
         file.write_raw(new_data, new_size);
     }
 };
 
-struct gptneox_model_loader {
-    std::vector<std::unique_ptr<arch_util_file_loader>> file_loaders;
-    gptneox_load_tensors_map tensors_map;
+struct falcon_model_loader {
+    std::vector<std::unique_ptr<falcon_file_loader>> file_loaders;
+    falcon_load_tensors_map tensors_map;
     bool use_mmap;
     size_t num_ggml_tensors_created = 0;
     struct ggml_context * ggml_ctx = NULL;
     std::unique_ptr<arch_util_mmap> mapping;
 
-    gptneox_model_loader(const std::string & fname_base, bool use_mmap, bool vocab_only) {
-        auto first_file = new arch_util_file_loader(fname_base.c_str(), 0, tensors_map);
+    falcon_model_loader(const std::string & fname_base, bool use_mmap, bool vocab_only) {
+        auto first_file = new falcon_file_loader(fname_base.c_str(), 0, tensors_map);
         file_loaders.emplace_back(first_file);
         uint32_t n_parts = 1;
         for (uint32_t i = 1; i < n_parts; i++) {
             std::string fname = fname_base + "." + std::to_string(i);
-            auto ith_file = new arch_util_file_loader(fname.c_str(), i, tensors_map);
+            auto ith_file = new falcon_file_loader(fname.c_str(), i, tensors_map);
             file_loaders.emplace_back(ith_file);
             if (ith_file->hparams != first_file->hparams) {
-                throw format("gptneox.cpp: hparams inconsistent between files");
+                throw format("falcon.cpp: hparams inconsistent between files");
             }
         }
         if (!arch_util_mmap::SUPPORTED) {
             use_mmap = false;
         }
         if (use_mmap && alignment_prevents_mmap()) {
-            fprintf(stderr, "gptneox.cpp: can't use mmap because tensors are not aligned; convert to new format to avoid this\n");
+            fprintf(stderr, "falcon.cpp: can't use mmap because tensors are not aligned; convert to new format to avoid this\n");
             use_mmap = false;
         }
         this->use_mmap = use_mmap;
-        for (gptneox_load_tensor & lt : tensors_map.tensors) {
+        for (falcon_load_tensor & lt : tensors_map.tensors) {
             lt.calc_all();
         }
     }
 
     bool alignment_prevents_mmap() {
-        for (const gptneox_load_tensor & lt : tensors_map.tensors) {
-            for (const gptneox_load_tensor_shard & shard : lt.shards) {
+        for (const falcon_load_tensor & lt : tensors_map.tensors) {
+            for (const falcon_load_tensor_shard & shard : lt.shards) {
                 if (shard.file_off & 3) {
                     return true;
                 }
@@ -641,7 +638,7 @@ struct gptneox_model_loader {
 
     void calc_sizes(size_t * ctx_size_p, size_t * mmapped_size_p) const {
         *ctx_size_p = *mmapped_size_p = 0;
-        for (const gptneox_load_tensor & lt : tensors_map.tensors) {
+        for (const falcon_load_tensor & lt : tensors_map.tensors) {
             *ctx_size_p += sizeof(struct ggml_tensor) + GGML_OBJECT_SIZE;
             *(use_mmap ? mmapped_size_p : ctx_size_p) += lt.size;
         }
@@ -650,23 +647,23 @@ struct gptneox_model_loader {
     struct ggml_tensor * get_tensor(const std::string & name, std::vector<uint32_t> ne) {
         auto it = tensors_map.name_to_idx.find(name);
         if (it == tensors_map.name_to_idx.end()) {
-            throw format("gptneox.cpp: tensor '%s' is missing from model", name.c_str());
+            throw format("falcon.cpp: tensor '%s' is missing from model", name.c_str());
         }
-        gptneox_load_tensor & lt = tensors_map.tensors.at(it->second);
+        falcon_load_tensor & lt = tensors_map.tensors.at(it->second);
         if (lt.ne != ne) {
-            throw format("gptneox.cpp: tensor '%s' has wrong shape; expected %s, got %s",
-                         name.c_str(), gptneox_format_tensor_shape(ne).c_str(), gptneox_format_tensor_shape(lt.ne).c_str());
+            throw format("falcon.cpp: tensor '%s' has wrong shape; expected %s, got %s",
+                         name.c_str(), falcon_format_tensor_shape(ne).c_str(), falcon_format_tensor_shape(lt.ne).c_str());
         }
         
         printf("%48s - %14s, type = %4s\n",
                lt.name.c_str(),
-               gptneox_format_tensor_shape(lt.ne).c_str(),
+               falcon_format_tensor_shape(lt.ne).c_str(),
                ggml_type_name(lt.type));
 
         return get_tensor_for(lt);
     }
 
-    struct ggml_tensor * get_tensor_for(gptneox_load_tensor & lt) {
+    struct ggml_tensor * get_tensor_for(falcon_load_tensor & lt) {
         struct ggml_tensor * tensor;
         if (lt.ne.size() == 2) {
             tensor = ggml_new_tensor_2d(ggml_ctx, lt.type, lt.ne.at(0), lt.ne.at(1));
@@ -682,13 +679,13 @@ struct gptneox_model_loader {
 
     void done_getting_tensors() {
         if (num_ggml_tensors_created != tensors_map.tensors.size()) {
-            throw std::string("gptneox.cpp: file contained more tensors than expected");
+            throw std::string("falcon.cpp: file contained more tensors than expected");
         }
     }
 
-    void load_all_data(gptneox_progress_callback progress_callback, void *  progress_callback_user_data, arch_util_mlock * lmlock) {
+    void load_all_data(falcon_progress_callback progress_callback, void *  progress_callback_user_data, arch_util_mlock * lmlock) {
         size_t data_size = 0;
-        for (const gptneox_load_tensor & lt : tensors_map.tensors) {
+        for (const falcon_load_tensor & lt : tensors_map.tensors) {
             data_size += lt.size;
         }
 
@@ -705,7 +702,7 @@ struct gptneox_model_loader {
         }
 
         size_t done_size = 0;
-        for (gptneox_load_tensor & lt : tensors_map.tensors) {
+        for (falcon_load_tensor & lt : tensors_map.tensors) {
             if (progress_callback) {
                 progress_callback((float) done_size / data_size, progress_callback_user_data);
             }
@@ -723,7 +720,7 @@ struct gptneox_model_loader {
         }
     }
 
-    void load_data_for(gptneox_load_tensor & lt) {
+    void load_data_for(falcon_load_tensor & lt) {
         if (use_mmap) {
             ARCH_ASSERT(lt.shards.size() == 1);
             lt.data = (uint8_t *) mapping->addr + lt.shards.at(0).file_off;
@@ -733,7 +730,7 @@ struct gptneox_model_loader {
             file.read_raw(lt.data, lt.size);
         } else if (lt.split_type == SPLIT_BY_ROWS) {
             size_t offset = 0;
-            for (gptneox_load_tensor_shard & shard : lt.shards) {
+            for (falcon_load_tensor_shard & shard : lt.shards) {
                 arch_util_file & file = file_loaders.at(shard.file_idx)->file;
                 file.seek(shard.file_off, SEEK_SET);
                 file.read_raw(lt.data + offset, shard.size);
@@ -745,7 +742,7 @@ struct gptneox_model_loader {
             std::vector<arch_util_buffer> tmp_bufs;
             tmp_bufs.resize(lt.shards.size());
             for (size_t i = 0; i < lt.shards.size(); i++) {
-                gptneox_load_tensor_shard & shard = lt.shards.at(i);
+                falcon_load_tensor_shard & shard = lt.shards.at(i);
                 arch_util_file & file = file_loaders.at(shard.file_idx)->file;
                 file.seek(shard.file_off, SEEK_SET);
                 tmp_bufs.at(i).resize(shard.size);
@@ -770,14 +767,14 @@ struct gptneox_model_loader {
         }
     }
 
-    static void print_checksum(gptneox_load_tensor & lt) {
+    static void print_checksum(falcon_load_tensor & lt) {
         uint32_t sum = 0;
         for (size_t i = 0; i < lt.size; i++) {
             uint8_t byte = lt.data[i];
             sum = byte + (sum << 6) + (sum << 16) - sum; // sdbm hash
         }
         fprintf(stderr, "%s checksum: %#08x (%s, size %zu)\n", lt.name.c_str(), sum,
-                gptneox_format_tensor_shape(lt.ne).c_str(), lt.size);
+                falcon_format_tensor_shape(lt.ne).c_str(), lt.size);
     }
 
 };
@@ -788,8 +785,8 @@ struct gptneox_model_loader {
 //
 
 static bool kv_cache_init(
-        const struct gptneox_hparams & hparams,
-             struct gptneox_kv_cache & cache,
+        const struct falcon_hparams & hparams,
+             struct falcon_kv_cache & cache,
                            ggml_type   wtype,
                                  int   n_ctx) {
     const int n_embd  = hparams.n_embd;
@@ -818,8 +815,8 @@ static bool kv_cache_init(
     return true;
 }
 
-struct gptneox_context_params gptneox_context_default_params() {
-    struct gptneox_context_params result = {
+struct falcon_context_params falcon_context_default_params() {
+    struct falcon_context_params result = {
         /*.seed                        =*/ DEFAULT_SEED,
         /*.n_ctx                       =*/ 512,
         /*.n_batch                     =*/ 512,
@@ -836,11 +833,11 @@ struct gptneox_context_params gptneox_context_default_params() {
     return result;
 }
 
-bool gptneox_mmap_supported() {
+bool falcon_mmap_supported() {
     return arch_util_mmap::SUPPORTED;
 }
 
-bool gptneox_mlock_supported() {
+bool falcon_mlock_supported() {
     return arch_util_mlock::SUPPORTED;
 }
 
@@ -848,33 +845,33 @@ bool gptneox_mlock_supported() {
 // model loading
 //
 
-static const char *arch_util_file_version_name(arch_util_file_version version) {
+static const char *falcon_file_version_name(falcon_file_version version) {
     switch (version) {
-        case GPTNEOX_FILE_VERSION_GGML: return "'ggml' (old version with low tokenizer quality and no mmap support)";
-        case GPTNEOX_FILE_VERSION_GGMF_V1: return "ggmf v1 (old version with no mmap support)";
-        case GPTNEOX_FILE_VERSION_GGJT_V1: return "ggjt v1 (latest)";
+        case FALCON_FILE_VERSION_GGML: return "'ggml' (old version with low tokenizer quality and no mmap support)";
+        case FALCON_FILE_VERSION_GGMF_V1: return "ggmf v1 (old version with no mmap support)";
+        case FALCON_FILE_VERSION_GGJT_V1: return "ggjt v1 (latest)";
         default: ARCH_ASSERT(false);
     }
 }
 
-static const char *gptneox_ftype_name(enum gptneox_ftype ftype) {
+static const char *falcon_ftype_name(enum falcon_ftype ftype) {
     switch (ftype) {
-        case GPTNEOX_FTYPE_ALL_F32:     return "all F32";
-        case GPTNEOX_FTYPE_MOSTLY_F16:  return "mostly F16";
-        case GPTNEOX_FTYPE_MOSTLY_Q4_0: return "mostly Q4_0";
-        case GPTNEOX_FTYPE_MOSTLY_Q4_1: return "mostly Q4_1";
-        case GPTNEOX_FTYPE_MOSTLY_Q4_1_SOME_F16:
+        case FALCON_FTYPE_ALL_F32:     return "all F32";
+        case FALCON_FTYPE_MOSTLY_F16:  return "mostly F16";
+        case FALCON_FTYPE_MOSTLY_Q4_0: return "mostly Q4_0";
+        case FALCON_FTYPE_MOSTLY_Q4_1: return "mostly Q4_1";
+        case FALCON_FTYPE_MOSTLY_Q4_1_SOME_F16:
                                       return "mostly Q4_1, some F16";
-        case GPTNEOX_FTYPE_MOSTLY_Q4_2: return "mostly Q4_2";
-        //case GPTNEOX_FTYPE_MOSTLY_Q4_3: return "mostly Q4_3";
-        case GPTNEOX_FTYPE_MOSTLY_Q5_0: return "mostly Q5_0";
-        case GPTNEOX_FTYPE_MOSTLY_Q5_1: return "mostly Q5_1";
-        case GPTNEOX_FTYPE_MOSTLY_Q8_0: return "mostly Q8_0";
+        case FALCON_FTYPE_MOSTLY_Q4_2: return "mostly Q4_2";
+        //case FALCON_FTYPE_MOSTLY_Q4_3: return "mostly Q4_3";
+        case FALCON_FTYPE_MOSTLY_Q5_0: return "mostly Q5_0";
+        case FALCON_FTYPE_MOSTLY_Q5_1: return "mostly Q5_1";
+        case FALCON_FTYPE_MOSTLY_Q8_0: return "mostly Q8_0";
         default:                      return "unknown, may not work";
     }
 }
 
-static const char *gptneox_model_type_name(e_model type) {
+static const char *falcon_model_type_name(e_model type) {
     switch (type) {
         case MODEL_3B: return "3B";
         case MODEL_7B: return "7B";
@@ -885,31 +882,31 @@ static const char *gptneox_model_type_name(e_model type) {
     }
 }
 
-static void gptneox_model_load_internal(
+static void falcon_model_load_internal(
         const std::string & fname,
-        gptneox_context & lctx,
+        falcon_context & lctx,
         int n_ctx,
         ggml_type memory_type,
         bool use_mmap,
         bool use_mlock,
         bool vocab_only,
-        gptneox_progress_callback progress_callback,
+        falcon_progress_callback progress_callback,
         void * progress_callback_user_data) {
 
     lctx.t_start_us = ggml_time_us();
 
-    std::unique_ptr<gptneox_model_loader> ml(new gptneox_model_loader(fname, use_mmap, vocab_only));
+    std::unique_ptr<falcon_model_loader> ml(new falcon_model_loader(fname, use_mmap, vocab_only));
 
     lctx.vocab = std::move(ml->file_loaders.at(0)->vocab);
     auto & model = lctx.model;
     model.hparams = ml->file_loaders.at(0)->hparams;
-    arch_util_file_version file_version = ml->file_loaders.at(0)->file_version;
+    falcon_file_version file_version = ml->file_loaders.at(0)->file_version;
     auto & hparams = model.hparams;
     
     {
         switch (hparams.n_layer) {
-            case 16: {
-                if (hparams.n_embd < 6144) {
+            case 32: {
+                if (hparams.n_embd < 4544) {
                     model.type = e_model::MODEL_3B;
                 } else {
                     model.type = e_model::MODEL_7B;
@@ -924,17 +921,17 @@ static void gptneox_model_load_internal(
     }
 
     {
-        fprintf(stderr, "%s: format     = %s\n",  __func__, arch_util_file_version_name(file_version));
+        fprintf(stderr, "%s: format     = %s\n",  __func__, falcon_file_version_name(file_version));
         fprintf(stderr, "%s: n_vocab    = %u\n",  __func__, hparams.n_vocab);
         fprintf(stderr, "%s: n_ctx      = %u\n",  __func__, hparams.n_ctx);
         fprintf(stderr, "%s: n_embd     = %u\n",  __func__, hparams.n_embd);
         fprintf(stderr, "%s: n_head     = %u\n",  __func__, hparams.n_head);
         fprintf(stderr, "%s: n_layer    = %u\n",  __func__, hparams.n_layer);
-        fprintf(stderr, "%s: n_rot      = %u\n",  __func__, hparams.n_rot);
-        fprintf(stderr, "%s: use_parallel_residual = %d\n", __func__, hparams.use_parallel_residual);
-        fprintf(stderr, "%s: ftype      = %u (%s)\n", __func__, hparams.ftype, gptneox_ftype_name(hparams.ftype));
+        //fprintf(stderr, "%s: n_rot      = %u\n",  __func__, hparams.n_rot);
+        fprintf(stderr, "%s: parallel_attn = %d\n", __func__, hparams.parallel_attn);
+        fprintf(stderr, "%s: ftype      = %u (%s)\n", __func__, hparams.ftype, falcon_ftype_name(hparams.ftype));
         fprintf(stderr, "%s: n_parts    = %zu\n", __func__, ml->file_loaders.size());
-        fprintf(stderr, "%s: model size = %s\n",  __func__, gptneox_model_type_name(model.type));
+        fprintf(stderr, "%s: model size = %s\n",  __func__, falcon_model_type_name(model.type));
     }
 
     if (vocab_only) {
@@ -959,7 +956,7 @@ static void gptneox_model_load_internal(
             MEM_REQ_SCRATCH1().at(model.type) +
             MEM_REQ_EVAL().at(model.type);
 
-        // this is the memory required by one gptneox_state
+        // this is the memory required by one falcon_state
         const size_t mem_required_state =
             scale*MEM_REQ_KV_SELF().at(model.type);
 
@@ -994,42 +991,46 @@ static void gptneox_model_load_internal(
         const uint32_t n_embd  = hparams.n_embd;
         const uint32_t n_layer = hparams.n_layer;
         const uint32_t n_vocab = hparams.n_vocab;
+        const uint32_t n_head = hparams.n_head;
+        const uint32_t head_dim = n_embd / n_head;
+        // Assumes multi_query (n_embd + 2 * head_dim), no multi_query is (n_embd * 3)
+        const uint32_t qkv_dim = n_embd + (2 * head_dim);
 
         ml->ggml_ctx = ctx;
 
-        model.wte       = ml->get_tensor("gpt_neox.embed_in.weight",            {n_embd, n_vocab});
-        model.ln_f_g    = ml->get_tensor("gpt_neox.final_layer_norm.weight",    {n_embd});
-        model.ln_f_b    = ml->get_tensor("gpt_neox.final_layer_norm.bias",      {n_embd});
-        model.lmh_g     = ml->get_tensor("embed_out.weight",                    {n_embd, n_vocab});
+        model.wte       = ml->get_tensor("transformer.word_embeddings.weight",            {n_embd, n_vocab});
+        model.ln_f_g    = ml->get_tensor("transformer.ln_f.weight",    {n_embd});
+        model.ln_f_b    = ml->get_tensor("transformer.ln_f.bias",      {n_embd});
+        model.lmh_w     = ml->get_tensor("lm_head.weight",                    {n_embd, n_vocab});
 
         model.layers.resize(n_layer);
         for (uint32_t i = 0; i < n_layer; ++i) {
             auto & layer = model.layers[i];
 
-            std::string layers_i = "gpt_neox.layers." + std::to_string(i);
+            std::string layers_i = "transformer.h." + std::to_string(i);
 
-            layer.ln_attn_g = ml->get_tensor(layers_i + ".input_layernorm.weight", {n_embd});
-            layer.ln_attn_b = ml->get_tensor(layers_i + ".input_layernorm.bias", {n_embd});
+            layer.ln_pre_g = ml->get_tensor(layers_i + ".input_layernorm.weight", {n_embd});
+            layer.ln_pre_b = ml->get_tensor(layers_i + ".input_layernorm.bias", {n_embd});
 
-            layer.c_attn_attn_w = ml->get_tensor(layers_i + ".attention.query_key_value.weight", {n_embd, n_embd * 3});
-            layer.c_attn_attn_b = ml->get_tensor(layers_i + ".attention.query_key_value.bias", {n_embd * 3});
-            layer.c_attn_proj_w = ml->get_tensor(layers_i + ".attention.dense.weight", {n_embd, n_embd});
-            layer.c_attn_proj_b = ml->get_tensor(layers_i + ".attention.dense.bias", {n_embd});
+            layer.attn_qkv_w = ml->get_tensor(layers_i + ".self_attention.query_key_value.weight", {n_embd, qkv_dim});
+            //layer.attn_qkv_b = ml->get_tensor(layers_i + ".self_attention.query_key_value.bias", {qkv_dim});
+            layer.attn_proj_w = ml->get_tensor(layers_i + ".self_attention.dense.weight", {n_embd, n_embd});
+            //layer.attn_proj_b = ml->get_tensor(layers_i + ".self_attention.dense.bias", {n_embd});
+            
+            //layer.ln_post_g = ml->get_tensor(layers_i + ".post_attn_layernorm.weight", {n_embd});
+            //layer.ln_post_b = ml->get_tensor(layers_i + ".post_attn_layernorm.bias", {n_embd});
 
-            layer.ln_ff_g = ml->get_tensor(layers_i + ".post_attention_layernorm.weight", {n_embd});
-            layer.ln_ff_b = ml->get_tensor(layers_i + ".post_attention_layernorm.bias", {n_embd});
-
-            layer.c_mlp_fc_w =   ml->get_tensor(layers_i + ".mlp.dense_h_to_4h.weight", {n_embd,   n_embd * 4});
-            layer.c_mlp_fc_b =   ml->get_tensor(layers_i + ".mlp.dense_h_to_4h.bias",   {n_embd * 4});
-            layer.c_mlp_proj_w = ml->get_tensor(layers_i + ".mlp.dense_4h_to_h.weight", {n_embd * 4,   n_embd});
-            layer.c_mlp_proj_b = ml->get_tensor(layers_i + ".mlp.dense_4h_to_h.bias",   {n_embd});
+            layer.mlp_fc_w =   ml->get_tensor(layers_i + ".mlp.dense_h_to_4h.weight", {n_embd,   n_embd * 4});
+            //layer.mlp_fc_b =   ml->get_tensor(layers_i + ".mlp.dense_h_to_4h.bias", {n_embd * 4});
+            layer.mlp_proj_w = ml->get_tensor(layers_i + ".mlp.dense_4h_to_h.weight", {n_embd * 4,   n_embd});
+            //layer.mlp_proj_b = ml->get_tensor(layers_i + ".mlp.dense_4h_to_h.bias", {n_embd});
         }
     }
 
     ml->done_getting_tensors();
 
     // populate `tensors_by_name`
-    for (gptneox_load_tensor & lt : ml->tensors_map.tensors) {
+    for (falcon_load_tensor & lt : ml->tensors_map.tensors) {
         model.tensors_by_name.emplace_back(lt.name, lt.ggml_tensor);
     }
 
@@ -1042,23 +1043,61 @@ static void gptneox_model_load_internal(
     lctx.t_load_us = ggml_time_us() - lctx.t_start_us;
 }
 
-static bool gptneox_model_load(
+static bool falcon_model_load(
         const std::string & fname,
-        gptneox_context & lctx,
+        falcon_context & lctx,
         int n_ctx,
         ggml_type memory_type,
         bool use_mmap,
         bool use_mlock,
         bool vocab_only,
-        gptneox_progress_callback progress_callback,
+        falcon_progress_callback progress_callback,
         void *progress_callback_user_data) {
     try {
-        gptneox_model_load_internal(fname, lctx, n_ctx, memory_type, use_mmap, use_mlock,
+        falcon_model_load_internal(fname, lctx, n_ctx, memory_type, use_mmap, use_mlock,
                                   vocab_only, progress_callback, progress_callback_user_data);
         return true;
     } catch (const std::string & err) {
         fprintf(stderr, "error loading model: %s\n", err.c_str());
         return false;
+    }
+}
+
+// For optimizing
+static void falcon_model_set_param(falcon_context & lctx) {
+    auto & model = lctx.model;
+    struct ggml_context* ctx = model.ctx;
+    const auto & hparams = model.hparams;
+    const uint32_t n_layer = hparams.n_layer;
+    
+    /*auto & state = model.state;
+    ggml_set_param(ctx, state.token);
+    ggml_set_param(ctx, state.logits);
+    ggml_set_param(ctx, state.targets);
+    ggml_set_param(ctx, state.errors);*/
+    
+    ggml_set_param(ctx, model.wte);
+    ggml_set_param(ctx, model.ln_f_g);
+    ggml_set_param(ctx, model.ln_f_b);
+    ggml_set_param(ctx, model.lmh_w);
+    
+    for (uint32_t i = 0; i < n_layer; i++) {
+        auto & layer = model.layers[i];
+        ggml_set_param(ctx, layer.ln_pre_g);
+        ggml_set_param(ctx, layer.ln_pre_b);
+        
+        ggml_set_param(ctx, layer.attn_qkv_w);
+        //ggml_set_param(ctx, layer.attn_qkv_b);
+        ggml_set_param(ctx, layer.attn_proj_w);
+        //ggml_set_param(ctx, layer.attn_proj_b);
+        
+        //ggml_set_param(ctx, layer.ln_post_g);
+        //ggml_set_param(ctx, layer.ln_post_b);
+        
+        ggml_set_param(ctx, layer.mlp_fc_w);
+        //ggml_set_param(ctx, layer.mlp_fc_b);
+        ggml_set_param(ctx, layer.mlp_proj_w);
+        //ggml_set_param(ctx, layer.mlp_proj_b);
     }
 }
 
@@ -1082,9 +1121,9 @@ static inline struct ggml_tensor * layer_norm(ggml_context * ctx, struct ggml_te
 //   - n_past:    the context size so far
 //   - n_threads: number of threads to use
 //
-static bool gptneox_eval_internal(
-        gptneox_context & lctx,
-    const gptneox_token * tokens,
+static bool falcon_eval_internal(
+        falcon_context & lctx,
+    const falcon_token * tokens,
             const int   n_tokens,
             const int   n_past,
             const int   n_threads) {
@@ -1104,9 +1143,15 @@ static bool gptneox_eval_internal(
     const int n_ctx   = hparams.n_ctx;
     const int n_head  = hparams.n_head;
     const int n_vocab = hparams.n_vocab;
-    const int n_rot   = hparams.n_rot;
     const int head_dim = n_embd / n_head;
-
+    const int qkv_dim = (n_head + 2) * head_dim;
+    
+    //const float rotary_pct = 0.25; // default for gptneox
+    const int n_rot = head_dim; //(int)((float)head_dim * rotary_pct);
+    
+    // self.num_kv_heads = config.num_kv_heads if (self.new_decoder_architecture or not self.multi_query) else 1
+    const int n_kv_heads = 1;
+    
     auto & mem_per_token = lctx.mem_per_token;
     auto & buf_compute   = lctx.buf_compute;
 
@@ -1129,68 +1174,67 @@ static bool gptneox_eval_internal(
     struct ggml_tensor * inpL = ggml_get_rows(ctx, model.wte, embd);
 
     for (int i = 0; i < n_layer; ++i) {
-        struct gptneox_layer & layer = model.layers[i];
+        struct falcon_layer & layer = model.layers[i];
         
         lctx.use_buf(ctx, 0);
 
         // input norm
-        struct ggml_tensor * cur = layer_norm(ctx, inpL, layer.ln_attn_g, layer.ln_attn_b);
+        struct ggml_tensor * cur = layer_norm(ctx, inpL, layer.ln_pre_g, layer.ln_pre_b);
+        struct ggml_tensor * outLN = cur;
 
         // self-attention
         {
-            // attn
-            // [3*n_embd, n_embd] - model.layers[il].c_attn_attn_w
-            // [3*n_embd,      1] - model.layers[il].c_attn_attn_b
-            // [  n_embd,      N] - cur (in)
-            // [3*n_embd,      N] - cur (out)
-            //
-            // cur = attn_w*cur + attn_b
-            // [3*n_embd, N]
-            {
-                cur = ggml_mul_mat(ctx, layer.c_attn_attn_w, cur);
-                cur = ggml_add_inplace(ctx,
-                        cur,
-                        ggml_repeat(ctx, layer.c_attn_attn_b, cur));
-            }
-             
-            // Split QKV and make contiguous
+            // Multi-query QKV, order of dims is reversed in ggml compared to py
+            // fused_qkv = fused_qkv.view(batch_size, seq_length, self.num_heads + 2, self.head_dim)
+            // return fused_qkv[..., :-2, :], fused_qkv[..., [-2], :], fused_qkv[..., [-1], :]
+            cur = ggml_mul_mat(ctx, layer.attn_qkv_w, cur);
+            
+            // Split qkv multi-query
+            // [ N, (n_head + 2) * head_dim ]
             struct ggml_tensor * Qcur = ggml_view_3d(ctx, cur,
-                                            head_dim,
-                                            n_head,
-                                            N,
-                                            ggml_element_size(cur) * 3 * head_dim,
-                                            ggml_element_size(cur) * 3 * n_embd,
-                                            ggml_element_size(cur) * head_dim * 0);
+                                                     head_dim,
+                                                     n_head,
+                                                     N,
+                                                     ggml_element_size(cur) * head_dim,
+                                                     ggml_element_size(cur) * qkv_dim,
+                                                     0);
             struct ggml_tensor * Kcur = ggml_view_3d(ctx, cur,
-                                            head_dim,
-                                            n_head,
-                                            N,
-                                            ggml_element_size(cur) * 3 * head_dim,
-                                            ggml_element_size(cur) * 3 * n_embd,
-                                            ggml_element_size(cur) * head_dim * 1);
+                                                     head_dim,
+                                                     1,
+                                                     N,
+                                                     ggml_element_size(cur) * head_dim,
+                                                     ggml_element_size(cur) * qkv_dim,
+                                                     ggml_element_size(cur) * (qkv_dim - head_dim * 2));
             struct ggml_tensor * Vcur = ggml_view_3d(ctx, cur,
-                                            head_dim,
-                                            n_head,
-                                            N,
-                                            ggml_element_size(cur) * 3 * head_dim,
-                                            ggml_element_size(cur) * 3 * n_embd,
-                                            ggml_element_size(cur) * head_dim * 2);
+                                                     head_dim,
+                                                     1,
+                                                     N,
+                                                     ggml_element_size(cur) * head_dim,
+                                                     ggml_element_size(cur) * qkv_dim,
+                                                     ggml_element_size(cur) * (qkv_dim - head_dim * 1));
+            
+            
             // TODO: Flatten without copying, or see if non-contiguous can be used for any of QKV.
             Qcur = ggml_cpy(ctx, Qcur,
                         ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim, n_head, N));
             Kcur = ggml_cpy(ctx, Kcur,
-                        ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim, n_head, N));
+                        ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim, 1, N));
             Vcur = ggml_cpy(ctx, Vcur,
-                        ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim, n_head, N));
+                        ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim, 1, N));
             
-            // MARK: gptneox RoPE Q and K, before cache
+            // TODO: This is a cheap hack for multi-query to make K and V the same size as Q so "normal" attention can be used
+            Kcur = ggml_repeat(ctx, Kcur, Qcur);
+            Vcur = ggml_repeat(ctx, Vcur, Qcur);
+            
+            // MARK: gptneox RoPE Q and K, before cache (falcon uses gptneox style)
             // Bit 2 for gptneox style (2)
             // Bit 1 is zero for dont skip n_past +(0), use (2+1) = (3) if rope is applied to cache of k (after cache only)
-            //Qcur = ggml_rope(ctx0, Qcur, n_past, n_rot, 2);
-            //Kcur = ggml_rope(ctx0, Kcur, n_past, n_rot, 2); //3);
+            //Qcur = ggml_rope(ctx, Qcur, n_past, n_rot, 2);
+            //Kcur = ggml_rope(ctx, Kcur, n_past, n_rot, 2); //3);
 
             // store key and value to memory, not required if prompt if only a single token (not practical or likely)
             //if (N >= 1) {
+                // Transpose V here so each entry only needs to be transposed once
                 // Each entry in kv_self has byte size of (ggml_element_size * n_embd * n_ctx * n_layer)
                 Vcur = ggml_view_2d(ctx, Vcur,
                             n_embd,
@@ -1235,13 +1279,13 @@ static bool gptneox_eval_internal(
                         Qcur,
                         0, 2, 1, 3);
 
-            // K = Kmem.view(n_embd/n_head, n_head, n_past + N).permute(0, 2, 1, 3)
+            // K = Kmem.view(head_dim, n_head, n_past + N).permute(0, 2, 1, 3)
             struct ggml_tensor * K =
                 ggml_permute(ctx, Kall,
                         /*ggml_reshape_3d(ctx,
                             ggml_view_1d(ctx, kv_self.k,
                                 (n_past + N) * n_embd,
-                                ggml_element_size(kv_self.k) * i * n_ctx * n_embd),
+                                ggml_element_size(kv_self.k) * il * n_ctx * n_embd),
                             head_dim, n_head, n_past + N),*/
                         0, 2, 1, 3);
 
@@ -1250,7 +1294,7 @@ static bool gptneox_eval_internal(
             // Outputs [N, N, H, B], so it seems like this is correct for "scores"
             // K is internally transposed by ggml_mul_mat
             struct ggml_tensor * KQ = ggml_mul_mat(ctx, K, Q);
-            // KQ_scaled = KQ / sqrt(n_embd/n_head)
+            // KQ_scaled = KQ / sqrt(head_dim)
             struct ggml_tensor * KQ_scaled = ggml_scale_inplace(ctx, KQ,
                                                 ggml_new_f32(ctx, 1.0f/sqrt(float(head_dim))));
             // KQ_masked = mask_past(KQ_scaled)
@@ -1278,70 +1322,58 @@ static bool gptneox_eval_internal(
                         ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, N));
 
             // projection (first weight)
-            cur = ggml_mul_mat(ctx, layer.c_attn_proj_w, cur);
+            cur = ggml_mul_mat(ctx, layer.attn_proj_w, cur);
 
             // projection (then bias)
-            cur = ggml_add_inplace(ctx, cur, ggml_repeat(ctx, layer.c_attn_proj_b, cur));
+                //cur = ggml_add(ctx, ggml_repeat(ctx, layer.attn_proj_b, cur), cur);
         }
 
         lctx.use_buf(ctx, 1);
         
-        if (hparams.use_parallel_residual == 1) {
+        if (hparams.parallel_attn == 1) {
             //printf("use_parallel_residual == 1\n");
             // This is independent of the self-attention result, so it could be done in parallel to the self-attention
             struct ggml_tensor * outAttn = cur;
-            // post attention layer norm
-            cur = layer_norm(ctx, inpL, layer.ln_ff_g, layer.ln_ff_b);
             // feed-forward network
             {
-                // note here we pass inpFF instead of cur
-                cur = ggml_mul_mat(ctx, layer.c_mlp_fc_w, cur);
-                cur = ggml_add_inplace(ctx,
-                            cur,
-                            ggml_repeat(ctx, layer.c_mlp_fc_b, cur));
+                // MLP FC (expand)
+                cur = ggml_mul_mat(ctx, layer.mlp_fc_w, outLN);
+                    //cur = ggml_add(ctx0, ggml_repeat(ctx0, model.layers[il].mlp_fc_b, cur), cur);
                 // GELU activation
-                cur = ggml_gelu(ctx, cur);
-                // projection
-                // cur = proj_w*inpFF + proj_b
-                cur = ggml_mul_mat(ctx, layer.c_mlp_proj_w, cur);
-                cur = ggml_add_inplace(ctx,
-                            cur,
-                            ggml_repeat(ctx, layer.c_mlp_proj_b, cur));
+                cur = ggml_gelu_inplace(ctx, cur);
+                // MLP Proj (contract)
+                cur = ggml_mul_mat(ctx, layer.mlp_proj_w, cur);
+                    //cur = ggml_add(ctx0, ggml_repeat(ctx0, model.layers[il].mlp_proj_b, cur), cur);
             }
             //# pseudocode:
             //# x = x + attn(ln1(x)) + mlp(ln2(x))
             // inpL = inpL + outAttn + cur
             cur = ggml_add_inplace(ctx, cur, outAttn);
             inpL = ggml_add_inplace(ctx, inpL, cur);
-        } else if (hparams.use_parallel_residual == 0) {
+        } else if (hparams.parallel_attn == 0) {
             //printf("use_parallel_residual == 0\n");
             // This takes the self-attention residual output as input to Feedforward
             struct ggml_tensor * outAttn = cur;
-            inpL = ggml_add(ctx, inpL, outAttn);
-            // post attention layer norm
-            cur = layer_norm(ctx, inpL, layer.ln_ff_g, layer.ln_ff_b);
+            inpL = ggml_add_inplace(ctx, outAttn, inpL);
+            // Only post attn ln if not parallel attn
+            outLN = layer_norm(ctx, inpL, layer.ln_post_g, layer.ln_post_b);
             // feed-forward network
             {
-                // note here we pass inpFF instead of cur
-                cur = ggml_mul_mat(ctx, layer.c_mlp_fc_w, cur);
-                cur = ggml_add_inplace(ctx,
-                               cur,
-                               ggml_repeat(ctx, layer.c_mlp_fc_b, cur));
+                // MLP FC (expand)
+                cur = ggml_mul_mat(ctx, layer.mlp_fc_w, outLN);
+                    //cur = ggml_add(ctx0, ggml_repeat(ctx0, model.layers[il].mlp_fc_b, cur), cur);
                 // GELU activation
-                cur = ggml_gelu(ctx, cur);
-                // projection
-                // cur = proj_w*inpFF + proj_b
-                cur = ggml_mul_mat(ctx, layer.c_mlp_proj_w, cur);
-                cur = ggml_add_inplace(ctx,
-                               cur,
-                               ggml_repeat(ctx, layer.c_mlp_proj_b, cur));
+                cur = ggml_gelu_inplace(ctx, cur);
+                // MLP Proj (contract)
+                cur = ggml_mul_mat(ctx, layer.mlp_proj_w, cur);
+                    //cur = ggml_add(ctx0, ggml_repeat(ctx0, model.layers[il].mlp_proj_b, cur), cur);
             }
             //# pseudocode:
             //# x = x + attn(ln1(x)) (residual above as input to mlp)
             //# x = x + mlp(ln2(x)) (residual after mlp aka inpFF + cur)
             inpL = ggml_add_inplace(ctx, inpL, cur);
         } else {
-            printf("use_parallel_residual == %d\n", hparams.use_parallel_residual);
+            printf("parallel_attn == %d\n", hparams.parallel_attn);
             assert(0);
         }
     }
@@ -1352,11 +1384,12 @@ static bool gptneox_eval_internal(
     struct ggml_tensor * embeddings = NULL;
 
     // norm
+    // inpL = ln_f_g*inpL + ln_f_b
     inpL = layer_norm(ctx, inpL, model.ln_f_g, model.ln_f_b);
     embeddings = inpL;
 
     // lm_head
-    inpL = ggml_mul_mat(ctx, model.lmh_g, inpL);
+    inpL = ggml_mul_mat(ctx, model.lmh_w, inpL);
 
     lctx.use_buf(ctx, -1);
 
@@ -1439,7 +1472,7 @@ static size_t utf8_len(char src) {
     return lookup[highbits];
 }
 
-struct gptneox_sp_symbol {
+struct falcon_sp_symbol {
     using index = int;
     index prev;
     index next;
@@ -1447,31 +1480,31 @@ struct gptneox_sp_symbol {
     size_t n;
 };
 
-struct gptneox_sp_bigram {
+struct falcon_sp_bigram {
     struct comparator {
-        bool operator()(gptneox_sp_bigram & l, gptneox_sp_bigram & r) {
+        bool operator()(falcon_sp_bigram & l, falcon_sp_bigram & r) {
             return (l.score < r.score) || (l.score == r.score && l.left > r.left);
         }
     };
-    using queue_storage = std::vector<gptneox_sp_bigram>;
-    using queue = std::priority_queue<gptneox_sp_bigram, queue_storage, comparator>;
-    gptneox_sp_symbol::index left;
-    gptneox_sp_symbol::index right;
+    using queue_storage = std::vector<falcon_sp_bigram>;
+    using queue = std::priority_queue<falcon_sp_bigram, queue_storage, comparator>;
+    falcon_sp_symbol::index left;
+    falcon_sp_symbol::index right;
     float score;
     size_t size;
 };
 
 // original implementation:
 // https://github.com/ggerganov/llama.cpp/commit/074bea2eb1f1349a0118239c4152914aecaa1be4
-struct gptneox_tokenizer {
-    gptneox_tokenizer(const gptneox_vocab & vocab): vocab_(vocab) {}
+struct falcon_tokenizer {
+    falcon_tokenizer(const falcon_vocab & vocab): vocab_(vocab) {}
 
-    void tokenize(const std::string & text, std::vector<gptneox_vocab::id> & output) {
+    void tokenize(const std::string & text, std::vector<falcon_vocab::id> & output) {
         // split string into utf8 chars
         int index = 0;
         size_t offs = 0;
         while (offs < text.size()) {
-            gptneox_sp_symbol sym;
+            falcon_sp_symbol sym;
             size_t char_len = std::min(text.size() - offs, utf8_len(text[offs]));
             sym.text = text.c_str() + offs;
             sym.n = char_len;
@@ -1525,7 +1558,7 @@ struct gptneox_tokenizer {
             if (token == vocab_.token_to_id.end()) {
                 // output any symbols that did not form tokens as bytes.
                 for (int j = 0; j < (int) symbol.n; ++j) {
-                    gptneox_vocab::id token_id = static_cast<uint8_t>(symbol.text[j]) + 3;
+                    falcon_vocab::id token_id = static_cast<uint8_t>(symbol.text[j]) + 3;
                     output.push_back(token_id);
                 }
             } else {
@@ -1553,7 +1586,7 @@ private:
 
         const auto &tok_score = vocab_.id_to_token[(*token).second];
 
-        gptneox_sp_bigram bigram;
+        falcon_sp_bigram bigram;
         bigram.left = left;
         bigram.right = right;
         bigram.score = tok_score.score;
@@ -1561,21 +1594,21 @@ private:
         work_queue_.push(bigram);
     }
 
-    const gptneox_vocab & vocab_;
-    std::vector<gptneox_sp_symbol> symbols_;
-    gptneox_sp_bigram::queue work_queue_;
+    const falcon_vocab & vocab_;
+    std::vector<falcon_sp_symbol> symbols_;
+    falcon_sp_bigram::queue work_queue_;
 };
 
-static std::vector<gptneox_vocab::id> gptneox_tokenize(const gptneox_vocab & vocab, const std::string & text, bool bos) {
-    gptneox_tokenizer tokenizer(vocab);
-    std::vector<gptneox_vocab::id> output;
+static std::vector<falcon_vocab::id> falcon_tokenize(const falcon_vocab & vocab, const std::string & text, bool bos) {
+    falcon_tokenizer tokenizer(vocab);
+    std::vector<falcon_vocab::id> output;
 
     if (text.size() == 0) {
         return output;
     }
 
     if (bos) {
-        output.push_back(gptneox_token_bos());
+        output.push_back(falcon_token_bos());
     }
 
     tokenizer.tokenize(text, output);
@@ -1586,14 +1619,14 @@ static std::vector<gptneox_vocab::id> gptneox_tokenize(const gptneox_vocab & voc
 // sampling
 //
 
-void gptneox_sample_softmax(struct gptneox_context * ctx, gptneox_token_data_array * candidates) {
+void falcon_sample_softmax(struct falcon_context * ctx, falcon_token_data_array * candidates) {
     assert(candidates->size > 0);
 
     const int64_t t_start_sample_us = ggml_time_us();
 
     // Sort the logits in descending order
     if (!candidates->sorted) {
-        std::sort(candidates->data, candidates->data + candidates->size, [](const gptneox_token_data & a, const gptneox_token_data & b) {
+        std::sort(candidates->data, candidates->data + candidates->size, [](const falcon_token_data & a, const falcon_token_data & b) {
             return a.logit > b.logit;
         });
         candidates->sorted = true;
@@ -1615,7 +1648,7 @@ void gptneox_sample_softmax(struct gptneox_context * ctx, gptneox_token_data_arr
     }
 }
 
-void gptneox_sample_top_k(struct gptneox_context * ctx, gptneox_token_data_array * candidates, int k, size_t min_keep) {
+void falcon_sample_top_k(struct falcon_context * ctx, falcon_token_data_array * candidates, int k, size_t min_keep) {
     const int64_t t_start_sample_us = ggml_time_us();
 
     k = std::max(k, (int) min_keep);
@@ -1623,7 +1656,7 @@ void gptneox_sample_top_k(struct gptneox_context * ctx, gptneox_token_data_array
 
     // Sort scores in descending order
     if (!candidates->sorted) {
-        auto comp = [](const gptneox_token_data & a, const gptneox_token_data & b) {
+        auto comp = [](const falcon_token_data & a, const falcon_token_data & b) {
             return a.logit > b.logit;
         };
         if (k == (int) candidates->size) {
@@ -1640,14 +1673,14 @@ void gptneox_sample_top_k(struct gptneox_context * ctx, gptneox_token_data_array
     }
 }
 
-void gptneox_sample_top_p(struct gptneox_context * ctx, gptneox_token_data_array * candidates, float p, size_t min_keep) {
+void falcon_sample_top_p(struct falcon_context * ctx, falcon_token_data_array * candidates, float p, size_t min_keep) {
     if (p >= 1.0f) {
         return;
     }
 
     const int64_t t_start_sample_us = ggml_time_us();
 
-    gptneox_sample_softmax(ctx, candidates);
+    falcon_sample_softmax(ctx, candidates);
 
     // Compute the cumulative probabilities
     float cum_sum = 0.0f;
@@ -1671,14 +1704,14 @@ void gptneox_sample_top_p(struct gptneox_context * ctx, gptneox_token_data_array
     }
 }
 
-void gptneox_sample_tail_free(struct gptneox_context * ctx, gptneox_token_data_array * candidates, float z, size_t min_keep) {
+void falcon_sample_tail_free(struct falcon_context * ctx, falcon_token_data_array * candidates, float z, size_t min_keep) {
     if (z >= 1.0f || candidates->size <= 2) {
         return;
     }
 
     const int64_t t_start_sample_us = ggml_time_us();
 
-    gptneox_sample_softmax(nullptr, candidates);
+    falcon_sample_softmax(nullptr, candidates);
 
     // Compute the first and second derivatives
     std::vector<float> first_derivatives(candidates->size - 1);
@@ -1723,7 +1756,7 @@ void gptneox_sample_tail_free(struct gptneox_context * ctx, gptneox_token_data_a
 }
 
 
-void gptneox_sample_typical(struct gptneox_context * ctx, gptneox_token_data_array * candidates, float p, size_t min_keep) {
+void falcon_sample_typical(struct falcon_context * ctx, falcon_token_data_array * candidates, float p, size_t min_keep) {
     // Reference implementation:
     // https://github.com/huggingface/transformers/compare/main...cimeister:typical-sampling:typical-pr
     if (p >= 1.0f) {
@@ -1733,7 +1766,7 @@ void gptneox_sample_typical(struct gptneox_context * ctx, gptneox_token_data_arr
     const int64_t t_start_sample_us = ggml_time_us();
 
     // Compute the softmax of logits and calculate entropy
-    gptneox_sample_softmax(nullptr, candidates);
+    falcon_sample_softmax(nullptr, candidates);
 
     float entropy = 0.0f;
     for (size_t i = 0; i < candidates->size; ++i) {
@@ -1771,7 +1804,7 @@ void gptneox_sample_typical(struct gptneox_context * ctx, gptneox_token_data_arr
     }
 
     // Resize the output vector to keep only the locally typical tokens
-    std::vector<gptneox_token_data> new_candidates;
+    std::vector<falcon_token_data> new_candidates;
     for (size_t i = 0; i < last_idx; ++i) {
         size_t idx = indices[i];
         new_candidates.push_back(candidates->data[idx]);
@@ -1786,7 +1819,7 @@ void gptneox_sample_typical(struct gptneox_context * ctx, gptneox_token_data_arr
     }
 }
 
-void gptneox_sample_temperature(struct gptneox_context * ctx, gptneox_token_data_array * candidates_p, float temp) {
+void falcon_sample_temperature(struct falcon_context * ctx, falcon_token_data_array * candidates_p, float temp) {
     const int64_t t_start_sample_us = ggml_time_us();
 
     for (size_t i = 0; i < candidates_p->size; ++i) {
@@ -1798,7 +1831,7 @@ void gptneox_sample_temperature(struct gptneox_context * ctx, gptneox_token_data
     }
 }
 
-void gptneox_sample_repetition_penalty(struct gptneox_context * ctx, gptneox_token_data_array * candidates, gptneox_token * last_tokens, size_t last_tokens_size, float penalty) {
+void falcon_sample_repetition_penalty(struct falcon_context * ctx, falcon_token_data_array * candidates, falcon_token * last_tokens, size_t last_tokens_size, float penalty) {
     if (last_tokens_size == 0 || penalty == 1.0f) {
         return;
     }
@@ -1827,7 +1860,7 @@ void gptneox_sample_repetition_penalty(struct gptneox_context * ctx, gptneox_tok
     }
 }
 
-void gptneox_sample_frequency_and_presence_penalties(struct gptneox_context * ctx, gptneox_token_data_array * candidates, gptneox_token * last_tokens_p, size_t last_tokens_size, float alpha_frequency, float alpha_presence) {
+void falcon_sample_frequency_and_presence_penalties(struct falcon_context * ctx, falcon_token_data_array * candidates, falcon_token * last_tokens_p, size_t last_tokens_size, float alpha_frequency, float alpha_presence) {
     if (last_tokens_size == 0 || (alpha_frequency == 0.0f && alpha_presence == 0.0f)) {
         return;
     }
@@ -1835,7 +1868,7 @@ void gptneox_sample_frequency_and_presence_penalties(struct gptneox_context * ct
     const int64_t t_start_sample_us = ggml_time_us();
 
     // Create a frequency map to count occurrences of each token in last_tokens
-    std::unordered_map<gptneox_token, int> token_count;
+    std::unordered_map<falcon_token, int> token_count;
     for (size_t i = 0; i < last_tokens_size; ++i) {
         token_count[last_tokens_p[i]]++;
     }
@@ -1859,13 +1892,13 @@ void gptneox_sample_frequency_and_presence_penalties(struct gptneox_context * ct
 }
 
 
-gptneox_token gptneox_sample_token_mirostat(struct gptneox_context * ctx, gptneox_token_data_array * candidates, float tau, float eta, int m, float * mu) {
+falcon_token falcon_sample_token_mirostat(struct falcon_context * ctx, falcon_token_data_array * candidates, float tau, float eta, int m, float * mu) {
     assert(ctx);
-    auto N = float(gptneox_n_vocab(ctx));
+    auto N = float(falcon_n_vocab(ctx));
     int64_t t_start_sample_us;
     t_start_sample_us = ggml_time_us();
 
-    gptneox_sample_softmax(nullptr, candidates);
+    falcon_sample_softmax(nullptr, candidates);
 
     // Estimate s_hat using the most probable m tokens
     float s_hat = 0.0;
@@ -1884,15 +1917,15 @@ gptneox_token gptneox_sample_token_mirostat(struct gptneox_context * ctx, gptneo
     float k = powf((epsilon_hat * powf(2, *mu)) / (1 - powf(N, -epsilon_hat)), 1 / s_hat);
 
     // Sample the next word X using top-k sampling
-    gptneox_sample_top_k(nullptr, candidates, int(k), 1);
+    falcon_sample_top_k(nullptr, candidates, int(k), 1);
     if (ctx) {
         ctx->t_sample_us += ggml_time_us() - t_start_sample_us;
     }
-    gptneox_token X = gptneox_sample_token(ctx, candidates);
+    falcon_token X = falcon_sample_token(ctx, candidates);
     t_start_sample_us = ggml_time_us();
 
     // Compute error as the difference between observed surprise and target surprise value
-    size_t X_idx = std::distance(candidates->data, std::find_if(candidates->data, candidates->data + candidates->size, [&](const gptneox_token_data & candidate) {
+    size_t X_idx = std::distance(candidates->data, std::find_if(candidates->data, candidates->data + candidates->size, [&](const falcon_token_data & candidate) {
         return candidate.id == X;
     }));
     float observed_surprise = -log2f(candidates->data[X_idx].p);
@@ -1908,30 +1941,30 @@ gptneox_token gptneox_sample_token_mirostat(struct gptneox_context * ctx, gptneo
     return X;
 }
 
-gptneox_token gptneox_sample_token_mirostat_v2(struct gptneox_context * ctx, gptneox_token_data_array * candidates, float tau, float eta, float * mu) {
+falcon_token falcon_sample_token_mirostat_v2(struct falcon_context * ctx, falcon_token_data_array * candidates, float tau, float eta, float * mu) {
     assert(ctx);
     int64_t t_start_sample_us;
     t_start_sample_us = ggml_time_us();
 
-    gptneox_sample_softmax(ctx, candidates);
+    falcon_sample_softmax(ctx, candidates);
 
     // Truncate the words with surprise values greater than mu
-    candidates->size = std::distance(candidates->data, std::find_if(candidates->data, candidates->data + candidates->size, [&](const gptneox_token_data & candidate) {
+    candidates->size = std::distance(candidates->data, std::find_if(candidates->data, candidates->data + candidates->size, [&](const falcon_token_data & candidate) {
         return -log2f(candidate.p) > *mu;
     }));
 
     // Normalize the probabilities of the remaining words
-    gptneox_sample_softmax(ctx, candidates);
+    falcon_sample_softmax(ctx, candidates);
 
     // Sample the next word X from the remaining words
     if (ctx) {
         ctx->t_sample_us += ggml_time_us() - t_start_sample_us;
     }
-    gptneox_token X = gptneox_sample_token(ctx, candidates);
+    falcon_token X = falcon_sample_token(ctx, candidates);
     t_start_sample_us = ggml_time_us();
 
     // Compute error as the difference between observed surprise and target surprise value
-    size_t X_idx = std::distance(candidates->data, std::find_if(candidates->data, candidates->data + candidates->size, [&](const gptneox_token_data & candidate) {
+    size_t X_idx = std::distance(candidates->data, std::find_if(candidates->data, candidates->data + candidates->size, [&](const falcon_token_data & candidate) {
         return candidate.id == X;
     }));
     float observed_surprise = -log2f(candidates->data[X_idx].p);
@@ -1946,15 +1979,15 @@ gptneox_token gptneox_sample_token_mirostat_v2(struct gptneox_context * ctx, gpt
     return X;
 }
 
-gptneox_token gptneox_sample_token_greedy(struct gptneox_context * ctx, gptneox_token_data_array * candidates) {
+falcon_token falcon_sample_token_greedy(struct falcon_context * ctx, falcon_token_data_array * candidates) {
     const int64_t t_start_sample_us = ggml_time_us();
 
     // Find max element
-    auto max_iter = std::max_element(candidates->data, candidates->data + candidates->size, [](const gptneox_token_data & a, const gptneox_token_data & b) {
+    auto max_iter = std::max_element(candidates->data, candidates->data + candidates->size, [](const falcon_token_data & a, const falcon_token_data & b) {
         return a.logit < b.logit;
     });
 
-    gptneox_token result = max_iter->id;
+    falcon_token result = max_iter->id;
     if (ctx) {
         ctx->t_sample_us += ggml_time_us() - t_start_sample_us;
         ctx->n_sample++;
@@ -1962,10 +1995,10 @@ gptneox_token gptneox_sample_token_greedy(struct gptneox_context * ctx, gptneox_
     return result;
 }
 
-gptneox_token gptneox_sample_token(struct gptneox_context * ctx, gptneox_token_data_array * candidates) {
+falcon_token falcon_sample_token(struct falcon_context * ctx, falcon_token_data_array * candidates) {
     assert(ctx);
     const int64_t t_start_sample_us = ggml_time_us();
-    gptneox_sample_softmax(nullptr, candidates);
+    falcon_sample_softmax(nullptr, candidates);
 
     std::vector<float> probs;
     probs.reserve(candidates->size);
@@ -1977,7 +2010,7 @@ gptneox_token gptneox_sample_token(struct gptneox_context * ctx, gptneox_token_d
     auto & rng = ctx->rng;
     int idx = dist(rng);
 
-    gptneox_token result = candidates->data[idx].id;
+    falcon_token result = candidates->data[idx].id;
 
     ctx->t_sample_us += ggml_time_us() - t_start_sample_us;
     ctx->n_sample++;
@@ -1988,8 +2021,8 @@ gptneox_token gptneox_sample_token(struct gptneox_context * ctx, gptneox_token_d
 // updating
 //
 
-static void gptneox_model_update_internal(const std::string & fname_inp, const std::string & fname_out) {
-    std::unique_ptr<gptneox_model_loader> model_loader(new gptneox_model_loader(fname_inp.c_str(),
+static void falcon_model_update_internal(const std::string & fname_inp, const std::string & fname_out) {
+    std::unique_ptr<falcon_model_loader> model_loader(new falcon_model_loader(fname_inp.c_str(),
                                                             /*use_mmap*/ false,
                                                             /*vocab_only*/ false));
     // Simply use the ftype of the first file
@@ -1997,7 +2030,7 @@ static void gptneox_model_update_internal(const std::string & fname_inp, const s
     arch_util_file_saver file_saver(fname_out.c_str(), model_loader->file_loaders.at(0).get(), ftype);
 
     size_t idx = 0;
-    for (gptneox_load_tensor & tensor : model_loader->tensors_map.tensors) {
+    for (falcon_load_tensor & tensor : model_loader->tensors_map.tensors) {
         arch_util_buffer read_data;
         read_data.resize(tensor.size);
         tensor.data = read_data.addr;
@@ -2005,18 +2038,18 @@ static void gptneox_model_update_internal(const std::string & fname_inp, const s
 
         printf("[%4zu/%4zu] %36s - %16s, type = %6s, ",
                ++idx, model_loader->tensors_map.tensors.size(),
-               tensor.name.c_str(), gptneox_format_tensor_shape(tensor.ne).c_str(),
+               tensor.name.c_str(), falcon_format_tensor_shape(tensor.ne).c_str(),
                ggml_type_name(tensor.type));
 
         file_saver.write_tensor(tensor, tensor.type, tensor.data, tensor.size);
     }
 }
 
-int gptneox_model_update(
+int falcon_model_update(
         const char * fname_inp,
         const char * fname_out) {
     try {
-        gptneox_model_update_internal(fname_inp, fname_out);
+        falcon_model_update_internal(fname_inp, fname_out);
         return 0;
     } catch (const std::string & err) {
         fprintf(stderr, "%s: failed to copy: %s\n", __func__, err.c_str());
@@ -2028,14 +2061,14 @@ int gptneox_model_update(
 // quantization
 //
 
-static void gptneox_model_quantize_internal(const std::string & fname_inp, const std::string & fname_out, enum gptneox_ftype ftype, int nthread) {
+static void falcon_model_quantize_internal(const std::string & fname_inp, const std::string & fname_out, enum falcon_ftype ftype, int nthread) {
     ggml_type quantized_type;
     switch (ftype) {
-        case GPTNEOX_FTYPE_MOSTLY_Q4_0: quantized_type = GGML_TYPE_Q4_0; break;
-        case GPTNEOX_FTYPE_MOSTLY_Q4_1: quantized_type = GGML_TYPE_Q4_1; break;
-        case GPTNEOX_FTYPE_MOSTLY_Q5_0: quantized_type = GGML_TYPE_Q5_0; break;
-        case GPTNEOX_FTYPE_MOSTLY_Q5_1: quantized_type = GGML_TYPE_Q5_1; break;
-        case GPTNEOX_FTYPE_MOSTLY_Q8_0: quantized_type = GGML_TYPE_Q8_0; break;
+        case FALCON_FTYPE_MOSTLY_Q4_0: quantized_type = GGML_TYPE_Q4_0; break;
+        case FALCON_FTYPE_MOSTLY_Q4_1: quantized_type = GGML_TYPE_Q4_1; break;
+        case FALCON_FTYPE_MOSTLY_Q5_0: quantized_type = GGML_TYPE_Q5_0; break;
+        case FALCON_FTYPE_MOSTLY_Q5_1: quantized_type = GGML_TYPE_Q5_1; break;
+        case FALCON_FTYPE_MOSTLY_Q8_0: quantized_type = GGML_TYPE_Q8_0; break;
         default: throw format("invalid output file type %d\n", ftype);
     };
 
@@ -2043,7 +2076,7 @@ static void gptneox_model_quantize_internal(const std::string & fname_inp, const
         nthread = std::thread::hardware_concurrency();
     }
 
-    std::unique_ptr<gptneox_model_loader> model_loader(new gptneox_model_loader(fname_inp.c_str(), /*use_mmap*/ false,
+    std::unique_ptr<falcon_model_loader> model_loader(new falcon_model_loader(fname_inp.c_str(), /*use_mmap*/ false,
                                                                             /*vocab_only*/ false));
     arch_util_file_saver file_saver(fname_out.c_str(), model_loader->file_loaders.at(0).get(), ftype);
 
@@ -2055,7 +2088,7 @@ static void gptneox_model_quantize_internal(const std::string & fname_inp, const
     std::mutex mutex;
 
     size_t idx = 0;
-    for (gptneox_load_tensor & tensor : model_loader->tensors_map.tensors) {
+    for (falcon_load_tensor & tensor : model_loader->tensors_map.tensors) {
         arch_util_buffer read_data;
         read_data.resize(tensor.size);
         tensor.data = read_data.addr;
@@ -2063,7 +2096,7 @@ static void gptneox_model_quantize_internal(const std::string & fname_inp, const
 
         printf("[%4zu/%4zu] %36s - %16s, type = %6s, ",
                ++idx, model_loader->tensors_map.tensors.size(),
-               tensor.name.c_str(), gptneox_format_tensor_shape(tensor.ne).c_str(),
+               tensor.name.c_str(), falcon_format_tensor_shape(tensor.ne).c_str(),
                ggml_type_name(tensor.type));
 
         // This used to be a regex, but <regex> has an extreme cost to compile times.
@@ -2181,12 +2214,12 @@ static void gptneox_model_quantize_internal(const std::string & fname_inp, const
 // interface implementation
 //
 
-struct gptneox_context * gptneox_init_from_file(
+struct falcon_context * falcon_init_from_file(
                              const char * path_model,
-            struct gptneox_context_params   params) {
+            struct falcon_context_params   params) {
     ggml_time_init();
 
-    gptneox_context * ctx = new gptneox_context;
+    falcon_context * ctx = new falcon_context;
 
     if (params.seed <= 0) {
         params.seed = time(NULL);
@@ -2214,11 +2247,11 @@ struct gptneox_context * gptneox_init_from_file(
 
     ggml_type memory_type = params.f16_kv ? GGML_TYPE_F16 : GGML_TYPE_F32;
 
-    if (!gptneox_model_load(path_model, *ctx, params.n_ctx, memory_type,
+    if (!falcon_model_load(path_model, *ctx, params.n_ctx, memory_type,
                           params.use_mmap, params.use_mlock, params.vocab_only,
                           params.progress_callback, params.progress_callback_user_data)) {
         fprintf(stderr, "%s: failed to load model\n", __func__);
-        gptneox_free(ctx);
+        falcon_free(ctx);
         return nullptr;
     }
 
@@ -2226,7 +2259,7 @@ struct gptneox_context * gptneox_init_from_file(
     if (!params.vocab_only) {
         if (!kv_cache_init(ctx->model.hparams, ctx->model.kv_self, memory_type, ctx->model.hparams.n_ctx)) {
             fprintf(stderr, "%s: kv_cache_init() failed for self-attention cache\n", __func__);
-            gptneox_free(ctx);
+            falcon_free(ctx);
             return nullptr;
         }
 
@@ -2257,17 +2290,17 @@ struct gptneox_context * gptneox_init_from_file(
     return ctx;
 }
 
-void gptneox_free(struct gptneox_context * ctx) {
+void falcon_free(struct falcon_context * ctx) {
     delete ctx;
 }
 
-int gptneox_model_quantize(
+int falcon_model_quantize(
         const char * fname_inp,
         const char * fname_out,
-  enum gptneox_ftype   ftype,
+  enum falcon_ftype   ftype,
         int          nthread) {
     try {
-        gptneox_model_quantize_internal(fname_inp, fname_out, ftype, nthread);
+        falcon_model_quantize_internal(fname_inp, fname_out, ftype, nthread);
         return 0;
     } catch (const std::string & err) {
         fprintf(stderr, "%s: failed to quantize: %s\n", __func__, err.c_str());
@@ -2275,7 +2308,7 @@ int gptneox_model_quantize(
     }
 }
 
-int gptneox_apply_lora_from_file_internal(struct gptneox_context * ctx, const char * path_lora, const char * path_base_model, int n_threads) {
+int falcon_apply_lora_from_file_internal(struct falcon_context * ctx, const char * path_lora, const char * path_base_model, int n_threads) {
     fprintf(stderr, "%s: applying lora adapter from '%s' - please wait ...\n", __func__, path_lora);
 
     auto & model = ctx->model;
@@ -2333,12 +2366,12 @@ int gptneox_apply_lora_from_file_internal(struct gptneox_context * ctx, const ch
 
 
     // load base model
-    std::unique_ptr<gptneox_model_loader> model_loader;
+    std::unique_ptr<falcon_model_loader> model_loader;
     ggml_context * base_ctx = NULL;
     arch_util_buffer base_buf;
     if (path_base_model) {
         fprintf(stderr, "%s: loading base model from '%s'\n", __func__, path_base_model);
-        model_loader.reset(new gptneox_model_loader(path_base_model, /*use_mmap*/ true, /*vocab_only*/ false));
+        model_loader.reset(new falcon_model_loader(path_base_model, /*use_mmap*/ true, /*vocab_only*/ false));
 
         size_t ctx_size, mmapped_size;
         model_loader->calc_sizes(&ctx_size, &mmapped_size);
@@ -2353,7 +2386,7 @@ int gptneox_apply_lora_from_file_internal(struct gptneox_context * ctx, const ch
 
         model_loader->ggml_ctx = base_ctx;
 
-        // maybe this should in gptneox_model_loader
+        // maybe this should in falcon_model_loader
         if (model_loader->use_mmap) {
             model_loader->mapping.reset(new arch_util_mmap(&model_loader->file_loaders.at(0)->file, /* prefetch */ false));
         }
@@ -2443,7 +2476,7 @@ int gptneox_apply_lora_from_file_internal(struct gptneox_context * ctx, const ch
                     return 1;
                 }
                 size_t idx = model_loader->tensors_map.name_to_idx[base_name];
-                gptneox_load_tensor & lt = model_loader->tensors_map.tensors[idx];
+                falcon_load_tensor & lt = model_loader->tensors_map.tensors[idx];
                 base_t = model_loader->get_tensor(base_name, { (uint32_t)dest_t->ne[0], (uint32_t)dest_t->ne[1] });
                 lt.data = (uint8_t *) lt.ggml_tensor->data;
                 model_loader->load_data_for(lt);
@@ -2514,21 +2547,21 @@ int gptneox_apply_lora_from_file_internal(struct gptneox_context * ctx, const ch
     return 0;
 }
 
-int gptneox_apply_lora_from_file(struct gptneox_context * ctx, const char * path_lora, const char * path_base_model, int n_threads) {
+int falcon_apply_lora_from_file(struct falcon_context * ctx, const char * path_lora, const char * path_base_model, int n_threads) {
     try {
-        return gptneox_apply_lora_from_file_internal(ctx, path_lora, path_base_model, n_threads);
+        return falcon_apply_lora_from_file_internal(ctx, path_lora, path_base_model, n_threads);
     } catch (const std::string & err) {
         fprintf(stderr, "%s: failed to apply lora adapter: %s\n", __func__, err.c_str());
         return 1;
     }
 }
 
-int gptneox_get_kv_cache_token_count(struct gptneox_context * ctx) {
+int falcon_get_kv_cache_token_count(struct falcon_context * ctx) {
     return ctx->model.kv_self.n;
 }
 
 // Assumes contiguous data
-void gptneox_shift_kv_cache(struct gptneox_context * ctx, int n) {
+void falcon_shift_kv_cache(struct falcon_context * ctx, int n) {
     auto & model = ctx->model;
     auto & kv_self = model.kv_self;
     auto & hparams = model.hparams;
@@ -2556,9 +2589,9 @@ void gptneox_shift_kv_cache(struct gptneox_context * ctx, int n) {
     }
 }
 
-#define GPTNEOX_MAX_RNG_STATE 64*1024
+#define FALCON_MAX_RNG_STATE 64*1024
 
-void gptneox_set_rng_seed(struct gptneox_context * ctx, int seed) {
+void falcon_set_rng_seed(struct falcon_context * ctx, int seed) {
     if (seed <= 0) {
         seed = time(NULL);
     }
@@ -2566,11 +2599,11 @@ void gptneox_set_rng_seed(struct gptneox_context * ctx, int seed) {
 }
 
 // Returns the size of the state
-size_t gptneox_get_state_size(struct gptneox_context * ctx) {
+size_t falcon_get_state_size(struct falcon_context * ctx) {
     // we don't know size of rng until we actually serialize it. so reserve more than enough memory for its serialized state.
     // for reference, std::mt19937(1337) serializes to 6701 bytes.
     const size_t s_rng_size        = sizeof(size_t);
-    const size_t s_rng             = GPTNEOX_MAX_RNG_STATE;
+    const size_t s_rng             = FALCON_MAX_RNG_STATE;
     const size_t s_logits_capacity = sizeof(size_t);
     const size_t s_logits_size     = sizeof(size_t);
     const size_t s_logits          = ctx->logits.capacity() * sizeof(float);
@@ -2597,7 +2630,7 @@ size_t gptneox_get_state_size(struct gptneox_context * ctx) {
 }
 
 // Copies the state to the specified destination address
-size_t gptneox_copy_state_data(struct gptneox_context * ctx, uint8_t * dest) {
+size_t falcon_copy_state_data(struct falcon_context * ctx, uint8_t * dest) {
     uint8_t * out = dest;
 
     // copy rng
@@ -2606,13 +2639,13 @@ size_t gptneox_copy_state_data(struct gptneox_context * ctx, uint8_t * dest) {
         rng_ss << ctx->rng;
 
         const size_t rng_size = rng_ss.str().size();
-        char rng_buf[GPTNEOX_MAX_RNG_STATE];
+        char rng_buf[FALCON_MAX_RNG_STATE];
 
-        memset(&rng_buf[0], 0, GPTNEOX_MAX_RNG_STATE);
+        memset(&rng_buf[0], 0, FALCON_MAX_RNG_STATE);
         memcpy(&rng_buf[0], rng_ss.str().data(), rng_ss.str().size());
 
         memcpy(out, &rng_size,   sizeof(rng_size));    out += sizeof(rng_size);
-        memcpy(out, &rng_buf[0], GPTNEOX_MAX_RNG_STATE); out += GPTNEOX_MAX_RNG_STATE;
+        memcpy(out, &rng_buf[0], FALCON_MAX_RNG_STATE); out += FALCON_MAX_RNG_STATE;
     }
 
     // copy logits
@@ -2645,7 +2678,7 @@ size_t gptneox_copy_state_data(struct gptneox_context * ctx, uint8_t * dest) {
     // copy kv cache
     {
         const size_t kv_size = ctx->model.kv_self.buf.size;
-        const int    kv_ntok = gptneox_get_kv_cache_token_count(ctx);
+        const int    kv_ntok = falcon_get_kv_cache_token_count(ctx);
 
         memcpy(out, &kv_size, sizeof(kv_size)); out += sizeof(kv_size);
         memcpy(out, &kv_ntok, sizeof(kv_ntok)); out += sizeof(kv_ntok);
@@ -2656,7 +2689,7 @@ size_t gptneox_copy_state_data(struct gptneox_context * ctx, uint8_t * dest) {
     }
 
     const size_t written  = out - dest;
-    const size_t expected = gptneox_get_state_size(ctx);
+    const size_t expected = falcon_get_state_size(ctx);
 
     ARCH_ASSERT(written == expected);
 
@@ -2664,16 +2697,16 @@ size_t gptneox_copy_state_data(struct gptneox_context * ctx, uint8_t * dest) {
 }
 
 // Sets the state reading from the specified source address
-size_t gptneox_set_state_data(struct gptneox_context * ctx, const uint8_t * src) {
+size_t falcon_set_state_data(struct falcon_context * ctx, const uint8_t * src) {
     const uint8_t * in = src;
 
     // set rng
     {
         size_t rng_size;
-        char   rng_buf[GPTNEOX_MAX_RNG_STATE];
+        char   rng_buf[FALCON_MAX_RNG_STATE];
 
         memcpy(&rng_size,   in, sizeof(rng_size));    in += sizeof(rng_size);
-        memcpy(&rng_buf[0], in, GPTNEOX_MAX_RNG_STATE); in += GPTNEOX_MAX_RNG_STATE;
+        memcpy(&rng_buf[0], in, FALCON_MAX_RNG_STATE); in += FALCON_MAX_RNG_STATE;
 
         std::stringstream rng_ss;
         rng_ss.str(std::string(&rng_buf[0], rng_size));
@@ -2739,20 +2772,20 @@ size_t gptneox_set_state_data(struct gptneox_context * ctx, const uint8_t * src)
     }
 
     const size_t nread    = in - src;
-    const size_t expected = gptneox_get_state_size(ctx);
+    const size_t expected = falcon_get_state_size(ctx);
 
     ARCH_ASSERT(nread == expected);
 
     return nread;
 }
 
-int gptneox_eval(
-        struct gptneox_context * ctx,
-           const gptneox_token * tokens,
+int falcon_eval(
+        struct falcon_context * ctx,
+           const falcon_token * tokens,
                          int   n_tokens,
                          int   n_past,
                          int   n_threads) {
-    if (!gptneox_eval_internal(*ctx, tokens, n_tokens, n_past, n_threads)) {
+    if (!falcon_eval_internal(*ctx, tokens, n_tokens, n_past, n_threads)) {
         fprintf(stderr, "%s: failed to eval\n", __func__);
         return 1;
     }
@@ -2764,13 +2797,13 @@ int gptneox_eval(
     return 0;
 }
 
-int gptneox_tokenize(
-        struct gptneox_context * ctx,
+int falcon_tokenize(
+        struct falcon_context * ctx,
                   const char * text,
-                 gptneox_token * tokens,
+                 falcon_token * tokens,
                          int   n_max_tokens,
                         bool   add_bos) {
-    auto res = gptneox_tokenize(ctx->vocab, text, add_bos);
+    auto res = falcon_tokenize(ctx->vocab, text, add_bos);
 
     if (n_max_tokens < (int) res.size()) {
         fprintf(stderr, "%s: too many tokens\n", __func__);
@@ -2784,48 +2817,49 @@ int gptneox_tokenize(
     return res.size();
 }
 
-int gptneox_n_vocab(struct gptneox_context * ctx) {
+int falcon_n_vocab(struct falcon_context * ctx) {
     return ctx->vocab.id_to_token.size();
 }
 
-int gptneox_n_ctx(struct gptneox_context * ctx) {
+int falcon_n_ctx(struct falcon_context * ctx) {
     return ctx->model.hparams.n_ctx;
 }
 
-int gptneox_n_embd(struct gptneox_context * ctx) {
+int falcon_n_embd(struct falcon_context * ctx) {
     return ctx->model.hparams.n_embd;
 }
 
-float * gptneox_get_logits(struct gptneox_context * ctx) {
+float * falcon_get_logits(struct falcon_context * ctx) {
+    //return (float *)(ctx->model.state.logits->data);
     return ctx->logits.data();
 }
 
-float * gptneox_get_embeddings(struct gptneox_context * ctx) {
+float * falcon_get_embeddings(struct falcon_context * ctx) {
     return ctx->embedding.data();
 }
 
-const char * gptneox_token_to_str(struct gptneox_context * ctx, gptneox_token token) {
-    if (token >= gptneox_n_vocab(ctx)) {
+const char * falcon_token_to_str(struct falcon_context * ctx, falcon_token token) {
+    if (token >= falcon_n_vocab(ctx)) {
         return nullptr;
     }
 
     return ctx->vocab.id_to_token[token].tok.c_str();
 }
 
-gptneox_token gptneox_str_to_token(struct gptneox_context * ctx, const char * str) {
+falcon_token falcon_str_to_token(struct falcon_context * ctx, const char * str) {
     return ctx->vocab.token_to_id[str];
 }
 
-gptneox_token gptneox_token_bos() {
-    return 0;
+falcon_token falcon_token_bos() {
+    return 11;
 }
 
-gptneox_token gptneox_token_eos() {
-    return 0;
+falcon_token falcon_token_eos() {
+    return 11;
 }
 
 
-void gptneox_print_timings(struct gptneox_context * ctx) {
+void falcon_print_timings(struct falcon_context * ctx) {
     const int64_t t_end_us = ggml_time_us();
 
     const int32_t n_sample = std::max(1, ctx->n_sample);
@@ -2840,14 +2874,14 @@ void gptneox_print_timings(struct gptneox_context * ctx) {
     fprintf(stderr, "%s:       total time = %8.2f ms\n", __func__, (t_end_us - ctx->t_start_us)/1000.0);
 }
 
-void gptneox_reset_timings(struct gptneox_context * ctx) {
+void falcon_reset_timings(struct falcon_context * ctx) {
     ctx->t_start_us = ggml_time_us();
     ctx->t_sample_us = ctx->n_sample = 0;
     ctx->t_eval_us   = ctx->n_eval   = 0;
     ctx->t_p_eval_us = ctx->n_p_eval = 0;
 }
 
-const char * gptneox_print_system_info(void) {
+const char * falcon_print_system_info(void) {
     static std::string s;
 
     s  = "";
@@ -2870,11 +2904,11 @@ const char * gptneox_print_system_info(void) {
 }
 
 // For internal test use
-std::vector<std::pair<std::string, struct ggml_tensor *>>& gptneox_internal_get_tensor_map(struct gptneox_context * ctx) {
+std::vector<std::pair<std::string, struct ggml_tensor *>>& falcon_internal_get_tensor_map(struct falcon_context * ctx) {
     return ctx->model.tensors_by_name;
 }
 
-size_t gptneox_load_session_file(struct gptneox_context * ctx, const char * path_session, gptneox_token * tokens_out, size_t n_token_capacity, size_t * n_token_count_out) {
+size_t falcon_load_session_file(struct falcon_context * ctx, const char * path_session, falcon_token * tokens_out, size_t n_token_capacity, size_t * n_token_count_out) {
     // TODO leverage mmap
     arch_util_file file(path_session, "rb");
     const uint32_t magic = file.read_u32();
@@ -2885,8 +2919,8 @@ size_t gptneox_load_session_file(struct gptneox_context * ctx, const char * path
         return 0;
     }
 
-    gptneox_hparams session_hparams;
-    file.read_raw(&session_hparams, sizeof(gptneox_hparams));
+    falcon_hparams session_hparams;
+    file.read_raw(&session_hparams, sizeof(falcon_hparams));
 
     // REVIEW
     if (session_hparams != ctx->model.hparams) {
@@ -2896,33 +2930,33 @@ size_t gptneox_load_session_file(struct gptneox_context * ctx, const char * path
 
     const uint32_t n_token_count = file.read_u32();
     ARCH_ASSERT(n_token_capacity >= n_token_count);
-    file.read_raw(tokens_out, sizeof(gptneox_token) * n_token_count);
+    file.read_raw(tokens_out, sizeof(falcon_token) * n_token_count);
     *n_token_count_out = n_token_count;
 
     const size_t n_state_size = file.size - file.tell();
-    const size_t n_orig_state_size = gptneox_get_state_size(ctx);
+    const size_t n_orig_state_size = falcon_get_state_size(ctx);
     if (n_state_size != n_orig_state_size) {
         fprintf(stderr, "%s : failed to validate state size\n", __func__);
     }
     std::unique_ptr<uint8_t[]> state_data(new uint8_t[n_state_size]);
     file.read_raw(state_data.get(), n_state_size);
-    return gptneox_set_state_data(ctx, state_data.get());
+    return falcon_set_state_data(ctx, state_data.get());
 }
 
-size_t gptneox_save_session_file(struct gptneox_context * ctx, const char * path_session, const gptneox_token * tokens, size_t n_token_count) {
+size_t falcon_save_session_file(struct falcon_context * ctx, const char * path_session, const falcon_token * tokens, size_t n_token_count) {
     // TODO save temp & swap
     arch_util_file file(path_session, "wb");
 
-    const size_t n_state_size = gptneox_get_state_size(ctx);
+    const size_t n_state_size = falcon_get_state_size(ctx);
     std::unique_ptr<uint8_t[]> state_data(new uint8_t[n_state_size]);
-    gptneox_copy_state_data(ctx, state_data.get());
+    falcon_copy_state_data(ctx, state_data.get());
 
     file.write_u32('ggsn'); // magic
     file.write_u32(0); // version
-    file.write_raw(&ctx->model.hparams, sizeof(gptneox_hparams));
+    file.write_raw(&ctx->model.hparams, sizeof(falcon_hparams));
 
     file.write_u32((uint32_t) n_token_count); // REVIEW
-    file.write_raw(tokens, sizeof(gptneox_token) * n_token_count);
+    file.write_raw(tokens, sizeof(falcon_token) * n_token_count);
 
     file.write_raw(state_data.get(), n_state_size);
     return n_state_size; // REVIEW

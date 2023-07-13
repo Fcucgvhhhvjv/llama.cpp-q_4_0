@@ -3,8 +3,8 @@
 #define _GNU_SOURCE
 #endif
 
-#include "common-rwkv.h"
-#include "rwkv.h"
+#include "common-falcon.h"
+#include "falcon.h"
 
 #include <cassert>
 #include <cinttypes>
@@ -26,7 +26,7 @@
 #endif
 
 static console_state con_st;
-static rwkv_context ** g_ctx;
+static falcon_context ** g_ctx;
 
 static bool is_interacting = false;
 
@@ -38,7 +38,7 @@ void sigint_handler(int signo) {
         if (!is_interacting) {
             is_interacting=true;
         } else {
-            rwkv_print_timings(*g_ctx);
+            falcon_print_timings(*g_ctx);
             _exit(130);
         }
     }
@@ -93,21 +93,21 @@ int main(int argc, char ** argv) {
         params.prompt = gpt_random_prompt(rng);
     }
     
-    rwkv_context * ctx;
+    falcon_context * ctx;
     g_ctx = &ctx;
     
     // load the model
     {
-        auto lparams = rwkv_context_default_params();
+        auto lparams = falcon_context_default_params();
         
         lparams.seed       = params.seed;
         lparams.n_ctx      = params.n_ctx;
         lparams.n_batch    = params.n_batch;
-        lparams.f16_rwkv_state     = false; //params.memory_f16;
+        lparams.f16_kv     = params.memory_f16;
         lparams.use_mmap   = params.use_mmap;
         lparams.use_mlock  = params.use_mlock;
         
-        ctx = rwkv_init_from_file(params.model.c_str(), lparams);
+        ctx = falcon_init_from_file(params.model.c_str(), lparams);
         
         if (ctx == NULL) {
             fprintf(stderr, "%s: error: failed to load model '%s'\n", __func__, params.model.c_str());
@@ -116,7 +116,7 @@ int main(int argc, char ** argv) {
     }
     
     if (!params.lora_adapter.empty()) {
-        int err = rwkv_apply_lora_from_file(ctx,
+        int err = falcon_apply_lora_from_file(ctx,
                                                params.lora_adapter.c_str(),
                                                params.lora_base.empty() ? NULL : params.lora_base.c_str(),
                                                params.n_threads);
@@ -130,32 +130,32 @@ int main(int argc, char ** argv) {
     {
         fprintf(stderr, "\n");
         fprintf(stderr, "system_info: n_threads = %d / %d | %s\n",
-                params.n_threads, std::thread::hardware_concurrency(), rwkv_print_system_info());
+                params.n_threads, std::thread::hardware_concurrency(), falcon_print_system_info());
     }
     
     // determine the maximum memory usage needed to do inference for the given n_batch and n_predict parameters
     // uncomment the "used_mem" line in llama.cpp to see the results
     if (params.mem_test) {
         {
-            const std::vector<rwkv_token> tmp(params.n_batch, 0);
-            rwkv_eval(ctx, tmp.data()[0], NULL);
+            const std::vector<falcon_token> tmp(params.n_batch, 0);
+            falcon_eval(ctx, tmp.data(), tmp.size(), 0, params.n_threads);
         }
         
         {
-            const std::vector<rwkv_token> tmp = { 0, };
-            rwkv_eval(ctx, tmp.data()[0], NULL);
+            const std::vector<falcon_token> tmp = { 0, };
+            falcon_eval(ctx, tmp.data(), tmp.size(), params.n_predict - 1, params.n_threads);
         }
         
-        rwkv_print_timings(ctx);
-        rwkv_free(ctx);
+        falcon_print_timings(ctx);
+        falcon_free(ctx);
         
         return 0;
     }
     
     // prefix & suffix for instruct mode
-    //const auto prompter_id = rwkv_str_to_token(ctx, "<|prompter|>");
-    //const auto endoftext_id = rwkv_str_to_token(ctx, "<|endoftext|>");
-    //const auto assistant_id = rwkv_str_to_token(ctx, "<|assistant|>");
+    const auto prompter_id = falcon_str_to_token(ctx, "<|prompter|>");
+    const auto endoftext_id = falcon_str_to_token(ctx, "<|endoftext|>");
+    const auto assistant_id = falcon_str_to_token(ctx, "<|assistant|>");
     
     // Always interactive in Open-Assistant
     params.interactive = true;
@@ -187,8 +187,13 @@ int main(int argc, char ** argv) {
                " - If you want to submit another line, end your input in '\\'.\n\n");
     }
     
-    //std::vector<std::vector<rwkv_token>> past = std::vector<std::vector<rwkv_token>>();
-    //int n_past = 0;
+    const int32_t top_k          = params.top_k;
+    const float   top_p          = params.top_p;
+    const float   temp           = params.temp;
+    const float   repeat_penalty = params.repeat_penalty;
+    
+    std::vector<std::vector<falcon_token>> past = std::vector<std::vector<falcon_token>>();
+    int n_past = 0;
     
     // Chat loop
     while (true) {
@@ -252,16 +257,15 @@ int main(int argc, char ** argv) {
         }
         
         // Tokenize prompt with oasst special tokens
-        buffer = "\n# Instruction:\n" + buffer + "\n\n# Response:\n";
-        auto prompt = ::rwkv_tokenize(ctx, buffer, false);
-        auto input = std::vector<rwkv_token>();
-        //input.push_back(prompter_id);
+        auto prompt = ::falcon_tokenize(ctx, buffer, false);
+        auto input = std::vector<falcon_token>();
+        input.push_back(prompter_id);
         input.insert(input.end(), prompt.begin(), prompt.end());
-        //input.push_back(endoftext_id);
-        //input.push_back(assistant_id);
+        input.push_back(endoftext_id);
+        input.push_back(assistant_id);
         
         // Keep input in past
-        //past.push_back(input);
+        past.push_back(input);
         
         // Verbose prompt
         if (params.verbose_prompt) {
@@ -269,51 +273,51 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "%s: prompt: '%s'\n", __func__, buffer.c_str());
             fprintf(stderr, "%s: number of tokens in prompt = %zu\n", __func__, input.size());
             for (int i = 0; i < (int) input.size(); i++) {
-                fprintf(stderr, "%6d -> '%s'\n", input[i], rwkv_token_to_str(ctx, input[i]));
+                fprintf(stderr, "%6d -> '%s'\n", input[i], falcon_token_to_str(ctx, input[i]));
             }
             fprintf(stderr, "\n");
         }
         
-        //const int n_ctx = rwkv_n_ctx(ctx);
-        const int n_vocab = rwkv_n_vocab(ctx);
-        const int n_input = input.size();
+        const int n_ctx = falcon_n_ctx(ctx);
+        const int n_vocab = falcon_n_vocab(ctx);
         
         // How many tokens to generate - check if theres space in context for atleast one token (or batch size tokens?)
-        /*if (n_input > n_ctx) {
+        auto n_input = input.size();
+        if (n_input > n_ctx) {
             fprintf(stderr, "%s : input too long\n", __func__);
             continue;
-        }*/
+        }
         
         // Check if we need to forget
-        /*auto n_total = n_past + n_input;
+        auto n_total = n_past + n_input;
         while (n_total > n_ctx) {
             auto n_forget = past.front().size();
             past.erase(past.begin());
-            rwkv_shift_kv_cache(ctx, n_forget);
+            falcon_shift_kv_cache(ctx, n_forget);
             n_past -= n_forget;
             n_total -= n_forget;
             //fprintf(stderr, "%s : %d tokens purged from context memory\n", __func__, n_forget);
-        }*/
+        }
         
         // Send batches to eval
         auto input_i = 0;
         while (input_i < n_input) {
-            //auto remaining = n_input - input_i;
-            //int n_eval = params.n_batch < remaining ? params.n_batch : remaining;
-            if (rwkv_eval(ctx, input[input_i], NULL)) {
+            auto remaining = n_input - input_i;
+            int n_eval = params.n_batch < remaining ? params.n_batch : remaining;
+            if (falcon_eval(ctx, &input[input_i], n_eval, n_past, params.n_threads)) {
                 fprintf(stderr, "%s : failed to eval\n", __func__);
                 return 1;
             }
-            input_i += 1; //n_eval;
-            //n_past += 1; //n_eval;
+            input_i += n_eval;
+            n_past += n_eval;
         }
         
         const float   temp            = params.temp;
-        const int32_t top_k           = params.top_k <= 0 ? rwkv_n_vocab(ctx) : params.top_k;
+        const int32_t top_k           = params.top_k <= 0 ? falcon_n_vocab(ctx) : params.top_k;
         const float   top_p           = params.top_p;
         const float   tfs_z           = params.tfs_z;
         const float   typical_p       = params.typical_p;
-        const int32_t repeat_last_n   = params.repeat_last_n; // < 0 ? n_ctx : params.repeat_last_n;
+        const int32_t repeat_last_n   = params.repeat_last_n < 0 ? n_ctx : params.repeat_last_n;
         const float   repeat_penalty  = params.repeat_penalty;
         const float   alpha_presence  = params.presence_penalty;
         const float   alpha_frequency = params.frequency_penalty;
@@ -323,16 +327,16 @@ int main(int argc, char ** argv) {
         const bool    penalize_nl     = params.penalize_nl;
         
         // Eval until space runs out
-        std::vector<rwkv_token> repeat = std::vector<rwkv_token>();
-        std::vector<rwkv_token> output = std::vector<rwkv_token>();
+        std::vector<falcon_token> repeat = std::vector<falcon_token>();
+        std::vector<falcon_token> output = std::vector<falcon_token>();
         // Loop
         bool output_enabled = true;
         while (output_enabled) {
             // Get token
-            rwkv_token id = 0;
+            falcon_token id = 0;
             
             {
-                auto logits = rwkv_get_logits(ctx);
+                auto logits = falcon_get_logits(ctx);
                 
                 // Apply params.logit_bias map
                 for (auto it = params.logit_bias.begin(); it != params.logit_bias.end(); it++) {
@@ -340,25 +344,25 @@ int main(int argc, char ** argv) {
                 }
                 
                 // Lets add some custom logit biases that will always help
-                rwkv_token backslash_token = rwkv_str_to_token(ctx, "\\");
+                falcon_token backslash_token = falcon_str_to_token(ctx, "\\");
                 logits[backslash_token] = -INFINITY;
 
-                std::vector<rwkv_token_data> candidates;
+                std::vector<falcon_token_data> candidates;
                 candidates.reserve(n_vocab);
-                for (rwkv_token token_id = 0; token_id < n_vocab; token_id++) {
-                    candidates.emplace_back(rwkv_token_data{token_id, logits[token_id], 0.0f});
+                for (falcon_token token_id = 0; token_id < n_vocab; token_id++) {
+                    candidates.emplace_back(falcon_token_data{token_id, logits[token_id], 0.0f});
                 }
 
-                rwkv_token_data_array candidates_p = { candidates.data(), candidates.size(), false };
+                falcon_token_data_array candidates_p = { candidates.data(), candidates.size(), false };
 
                 // Apply penalties
-                rwkv_token nl_token = rwkv_str_to_token(ctx, "\n");
+                falcon_token nl_token = falcon_str_to_token(ctx, "\n");
                 float nl_logit = logits[nl_token];
-                auto last_n_repeat = /*std::min(*/ std::min((int)repeat.size(), repeat_last_n); /*, n_ctx);*/
-                rwkv_sample_repetition_penalty(ctx, &candidates_p,
+                auto last_n_repeat = std::min(std::min((int)repeat.size(), repeat_last_n), n_ctx);
+                falcon_sample_repetition_penalty(ctx, &candidates_p,
                     repeat.data() + repeat.size() - last_n_repeat,
                     last_n_repeat, repeat_penalty);
-                rwkv_sample_frequency_and_presence_penalties(ctx, &candidates_p,
+                falcon_sample_frequency_and_presence_penalties(ctx, &candidates_p,
                     repeat.data() + repeat.size() - last_n_repeat,
                     last_n_repeat, alpha_frequency, alpha_presence);
                 if (!penalize_nl) {
@@ -367,25 +371,25 @@ int main(int argc, char ** argv) {
 
                 if (temp <= 0) {
                     // Greedy sampling
-                    id = rwkv_sample_token_greedy(ctx, &candidates_p);
+                    id = falcon_sample_token_greedy(ctx, &candidates_p);
                 } else {
                     if (mirostat == 1) {
                         static float mirostat_mu = 2.0f * mirostat_tau;
                         const int mirostat_m = 100;
-                        rwkv_sample_temperature(ctx, &candidates_p, temp);
-                        id = rwkv_sample_token_mirostat(ctx, &candidates_p, mirostat_tau, mirostat_eta, mirostat_m, &mirostat_mu);
+                        falcon_sample_temperature(ctx, &candidates_p, temp);
+                        id = falcon_sample_token_mirostat(ctx, &candidates_p, mirostat_tau, mirostat_eta, mirostat_m, &mirostat_mu);
                     } else if (mirostat == 2) {
                         static float mirostat_mu = 2.0f * mirostat_tau;
-                        rwkv_sample_temperature(ctx, &candidates_p, temp);
-                        id = rwkv_sample_token_mirostat_v2(ctx, &candidates_p, mirostat_tau, mirostat_eta, &mirostat_mu);
+                        falcon_sample_temperature(ctx, &candidates_p, temp);
+                        id = falcon_sample_token_mirostat_v2(ctx, &candidates_p, mirostat_tau, mirostat_eta, &mirostat_mu);
                     } else {
                         // Temperature sampling
-                        rwkv_sample_top_k(ctx, &candidates_p, top_k, 1);
-                        rwkv_sample_tail_free(ctx, &candidates_p, tfs_z, 1);
-                        rwkv_sample_typical(ctx, &candidates_p, typical_p, 1);
-                        rwkv_sample_top_p(ctx, &candidates_p, top_p, 1);
-                        rwkv_sample_temperature(ctx, &candidates_p, temp);
-                        id = rwkv_sample_token(ctx, &candidates_p);
+                        falcon_sample_top_k(ctx, &candidates_p, top_k, 1);
+                        falcon_sample_tail_free(ctx, &candidates_p, tfs_z, 1);
+                        falcon_sample_typical(ctx, &candidates_p, typical_p, 1);
+                        falcon_sample_top_p(ctx, &candidates_p, top_p, 1);
+                        falcon_sample_temperature(ctx, &candidates_p, temp);
+                        id = falcon_sample_token(ctx, &candidates_p);
                     }
                 }
             }
@@ -394,37 +398,31 @@ int main(int argc, char ** argv) {
             output.push_back(id);
             // Repeat tokens update
             repeat.push_back(id);
-            if ((int)repeat.size() > params.repeat_last_n) {
+            if (repeat.size() > params.repeat_last_n) {
                 repeat.erase(repeat.begin());
             }
             // Check for eos - end early - check eos before bos in case they are the same
-            if (id == rwkv_token_eos()) {
-                output_enabled = false;
-                continue;
-            }
-            // Check for "\n\n" which is used as end of response in rwkv models
-            if (id == rwkv_str_to_token(ctx, "\n\n")) {
+            if (id == falcon_token_eos()) {
                 output_enabled = false;
                 continue;
             }
             // Check for bos - skip callback if so
             bool skip_callback = false;
-            if (id == rwkv_token_bos()) {
+            if (id == falcon_token_bos()) {
                 skip_callback = true;
             }
             // Convert token to string and display
             if (!skip_callback) {
-                printf("%s", rwkv_token_to_str(ctx, id));
+                printf("%s", falcon_token_to_str(ctx, id));
                 fflush(stdout);
             }
             // Check if we need to run another eval
             if (output_enabled) {
                 // Send generated token back into model for next generation
-                if (rwkv_eval(ctx, id, NULL)) {
+                if (falcon_eval(ctx, &id, 1, n_past, params.n_threads)) {
                     fprintf(stderr, "%s : failed to eval\n", __func__);
                     return 1;
                 }
-                /*
                 // Increment past count
                 n_past += 1;
                 // Check if we need to forget
@@ -438,11 +436,10 @@ int main(int argc, char ** argv) {
                         n_forget = past.front().size();
                         past.erase(past.begin());
                     }
-                    rwkv_shift_kv_cache(ctx, n_forget);
+                    falcon_shift_kv_cache(ctx, n_forget);
                     n_past -= n_forget;
                     //fprintf(stderr, "%s : %d tokens purged from context memory\n", __func__, n_forget);
                 }
-                 */
             }
             // Check for user interrupt
             if (is_interacting) {
@@ -450,7 +447,7 @@ int main(int argc, char ** argv) {
             }
         }
         // Update past with most recent response
-        //past.push_back(output);
+        past.push_back(output);
         printf("\n");
         fflush(stdout);
         //fprintf(stderr, "%s : past token count %d/%d\n", __func__, n_past, n_ctx);
@@ -460,8 +457,8 @@ int main(int argc, char ** argv) {
     signal(SIGINT, SIG_DFL);
 #endif
 
-    rwkv_print_timings(ctx);
-    rwkv_free(ctx);
+    falcon_print_timings(ctx);
+    falcon_free(ctx);
 
     set_console_color(con_st, CONSOLE_COLOR_DEFAULT);
 
