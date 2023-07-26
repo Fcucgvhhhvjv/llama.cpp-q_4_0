@@ -7,7 +7,7 @@
 cd `dirname $0`
 cd ..
 
-./main-falcon -m ./models/falcon/ggml-falcon-7b-instruct-q4_0.bin \
+./main-bonsai -m ./models/bonsai/ggml-bonsai-1b-q4_0.bin \
         -c 2048 \
         -b 8 \
         -n -1 \

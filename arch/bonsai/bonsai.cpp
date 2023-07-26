@@ -6,7 +6,7 @@
 #endif
 
 #include "../arch-util.h"
-#include "falcon.h"
+#include "bonsai.h"
 
 #include "../ggml.h"
 
@@ -29,10 +29,10 @@
 #include <mutex>
 #include <sstream>
 
-#define FALCON_USE_SCRATCH
-#define FALCON_MAX_SCRATCH_BUFFERS 16
+#define BONSAI_USE_SCRATCH
+#define BONSAI_MAX_SCRATCH_BUFFERS 16
 
-// available open-assistant based falcon models
+// available open-assistant based bonsai models
 // OpenAssistant/stablelm-7b-sft-v7-epoch-3
 // OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5
 enum e_model {
@@ -50,7 +50,7 @@ static const size_t MiB = 1024*1024;
 // TODO: To load the stablelm 3B model on my test XR will require some tricks, small ggml context size, mmap support, among others, but is maybe feasible, is a smaller n_ctx required? 512 instead of 2048/4096? Does mmap work as desired on iOS?
 //       needs modifications in ggml
 
-// TODO: Modify for falcon, how are these values actually determined?
+// TODO: Modify for bonsai, how are these values actually determined?
 // TODO: This is now priority, 
 static const std::map<e_model, size_t> & MEM_REQ_SCRATCH0()
 {
@@ -63,7 +63,7 @@ static const std::map<e_model, size_t> & MEM_REQ_SCRATCH0()
     return _MEM_REQ_SCRATCH0;
 }
 
-// TODO: Modify for falcon, how are these values actually determined?
+// TODO: Modify for bonsai, how are these values actually determined?
 static const std::map<e_model, size_t> & MEM_REQ_SCRATCH1()
 {
     static std::map<e_model, size_t> _MEM_REQ_SCRATCH1 = {
@@ -75,7 +75,7 @@ static const std::map<e_model, size_t> & MEM_REQ_SCRATCH1()
     return _MEM_REQ_SCRATCH1;
 }
 
-// TODO: Modify for falcon, how are these values actually determined?
+// TODO: Modify for bonsai, how are these values actually determined?
 // 2*n_embd*n_ctx*n_layer*sizeof(float16)
 // llama 7B: 2 * 768 * 32 * 2 = 98304
 static const std::map<e_model, size_t> & MEM_REQ_KV_SELF()
@@ -89,7 +89,7 @@ static const std::map<e_model, size_t> & MEM_REQ_KV_SELF()
     return _MEM_REQ_KV_SELF;
 }
 
-// TODO: Modify for falcon, how are these values actually determined?
+// TODO: Modify for bonsai, how are these values actually determined?
 // this is mostly needed for temporary mul_mat buffers to dequantize the data
 // not actually needed if BLAS is disabled
 static const std::map<e_model, size_t> & MEM_REQ_EVAL()
@@ -104,7 +104,7 @@ static const std::map<e_model, size_t> & MEM_REQ_EVAL()
 }
 
 // default hparams (GPT-NeoX oasst 12B)
-struct falcon_hparams {
+struct bonsai_hparams {
     uint32_t n_vocab = 50288;
     uint32_t n_ctx   = 2048;   // Hard-coded max sequence length
     uint32_t n_embd  = 5120;
@@ -112,14 +112,14 @@ struct falcon_hparams {
     uint32_t n_layer = 36;
     //uint32_t n_rot   = 32;
     uint32_t parallel_attn = 1; // 1 = true, 0 = false
-    enum falcon_ftype ftype = FALCON_FTYPE_MOSTLY_F16;
+    enum bonsai_ftype ftype = BONSAI_FTYPE_MOSTLY_F16;
 
-    bool operator!=(const falcon_hparams & other) const {
-        return memcmp(this, &other, sizeof(falcon_hparams));
+    bool operator!=(const bonsai_hparams & other) const {
+        return memcmp(this, &other, sizeof(bonsai_hparams));
     }
 };
 
-struct falcon_layer {
+struct bonsai_layer {
     // input_layernorm
     struct ggml_tensor * ln_pre_g;
     struct ggml_tensor * ln_pre_b;
@@ -141,7 +141,7 @@ struct falcon_layer {
     //struct ggml_tensor * mlp_proj_b;
 };
 
-struct falcon_kv_cache {
+struct bonsai_kv_cache {
     struct ggml_tensor * k;
     struct ggml_tensor * v;
 
@@ -151,17 +151,17 @@ struct falcon_kv_cache {
 
     int n; // number of tokens currently in the cache
 
-    ~falcon_kv_cache() {
+    ~bonsai_kv_cache() {
         if (ctx) {
             ggml_free(ctx);
         }
     }
 };
 
-struct falcon_model {
+struct bonsai_model {
     e_model type = MODEL_UNKNOWN;
 
-    falcon_hparams hparams;
+    bonsai_hparams hparams;
 
     // word embedding
     struct ggml_tensor * wte;
@@ -173,14 +173,14 @@ struct falcon_model {
     // language model head
     struct ggml_tensor * lmh_w;
 
-    std::vector<falcon_layer> layers;
+    std::vector<bonsai_layer> layers;
 
     // context
     struct ggml_context * ctx = NULL;
 
     // key + value cache for the self attention
-    // TODO: move to falcon_state
-    struct falcon_kv_cache kv_self;
+    // TODO: move to bonsai_state
+    struct bonsai_kv_cache kv_self;
 
     // the model memory buffer
     arch_util_buffer buf;
@@ -195,14 +195,14 @@ struct falcon_model {
     // for quantize-stats only
     std::vector<std::pair<std::string, struct ggml_tensor *>> tensors_by_name;
 
-    ~falcon_model() {
+    ~bonsai_model() {
         if (ctx) {
             ggml_free(ctx);
         }
     }
 };
 
-struct falcon_vocab {
+struct bonsai_vocab {
     using id    = int32_t;
     using token = std::string;
 
@@ -215,7 +215,7 @@ struct falcon_vocab {
     std::vector<token_score> id_to_token;
 };
 
-struct falcon_context {
+struct bonsai_context {
     std::mt19937 rng;
 
     int64_t t_load_us = 0;
@@ -230,8 +230,8 @@ struct falcon_context {
     int32_t n_eval   = 0; // number of eval calls
     int32_t n_p_eval = 0; // number of tokens in eval calls for the prompt (with batch size > 1)
 
-    falcon_model model;
-    falcon_vocab vocab;
+    bonsai_model model;
+    bonsai_vocab vocab;
 
     size_t mem_per_token = 0;
 
@@ -243,15 +243,15 @@ struct falcon_context {
     std::vector<float> embedding;
 
     // memory buffers used to evaluate the model
-    // TODO: move in falcon_state
+    // TODO: move in bonsai_state
     arch_util_buffer buf_compute;
-    arch_util_buffer buf_scratch[FALCON_MAX_SCRATCH_BUFFERS];
+    arch_util_buffer buf_scratch[BONSAI_MAX_SCRATCH_BUFFERS];
 
     int    buf_last = 0;
-    size_t buf_max_size[FALCON_MAX_SCRATCH_BUFFERS] = { 0 };
+    size_t buf_max_size[BONSAI_MAX_SCRATCH_BUFFERS] = { 0 };
 
     void use_buf(struct ggml_context * ctx, int i) {
-#if defined(FALCON_USE_SCRATCH)
+#if defined(BONSAI_USE_SCRATCH)
         size_t last_size = 0;
 
         if (i == -1) {
@@ -273,7 +273,7 @@ struct falcon_context {
     }
 
     size_t get_buf_max_mem(int i) const {
-#if defined(FALCON_USE_SCRATCH)
+#if defined(BONSAI_USE_SCRATCH)
         return buf_max_size[i];
 #else
         (void) i;
@@ -299,7 +299,7 @@ static size_t checked_div(size_t a, size_t b) {
     return a / b;
 }
 
-static std::string falcon_format_tensor_shape(const std::vector<uint32_t> & ne) {
+static std::string bonsai_format_tensor_shape(const std::vector<uint32_t> & ne) {
     char buf[256];
     snprintf(buf, sizeof(buf), "%5u", ne.at(0));
     for (size_t i = 1; i < ne.size(); i++) {
@@ -308,7 +308,7 @@ static std::string falcon_format_tensor_shape(const std::vector<uint32_t> & ne) 
     return buf;
 }
 
-static size_t falcon_calc_tensor_size(const std::vector<uint32_t> & ne, enum ggml_type type) {
+static size_t bonsai_calc_tensor_size(const std::vector<uint32_t> & ne, enum ggml_type type) {
     size_t size = ggml_type_size(type);
     for (uint32_t dim : ne) {
         size = checked_mul<size_t>(size, dim);
@@ -316,7 +316,7 @@ static size_t falcon_calc_tensor_size(const std::vector<uint32_t> & ne, enum ggm
     return size / ggml_blck_size(type);
 }
 
-struct falcon_load_tensor_shard {
+struct bonsai_load_tensor_shard {
     std::vector<uint32_t> ne;
     size_t size;
     enum ggml_type type;
@@ -324,28 +324,28 @@ struct falcon_load_tensor_shard {
     size_t file_off;
 
     void calc_size() {
-        size = falcon_calc_tensor_size(ne, type);
+        size = bonsai_calc_tensor_size(ne, type);
     }
 };
 
-enum falcon_split_type {
+enum bonsai_split_type {
     SPLIT_NONE,
     SPLIT_BY_COLUMNS,
     SPLIT_BY_ROWS
 };
 
-struct falcon_load_tensor {
-    std::vector<falcon_load_tensor_shard> shards;
+struct bonsai_load_tensor {
+    std::vector<bonsai_load_tensor_shard> shards;
 
     std::string name;
     enum ggml_type type = GGML_TYPE_F32;
-    falcon_split_type split_type = SPLIT_NONE;
+    bonsai_split_type split_type = SPLIT_NONE;
     std::vector<uint32_t> ne;
     size_t size;
     struct ggml_tensor * ggml_tensor = NULL;
     uint8_t * data;
 
-    falcon_load_tensor(const std::string & name) : name(name) {}
+    bonsai_load_tensor(const std::string & name) : name(name) {}
 
     void calc_all() {
         calc_type();
@@ -382,7 +382,7 @@ struct falcon_load_tensor {
         for (const auto & shard : shards) {
             if (shard.ne != first_shard.ne) {
                 throw format("inconsistent tensor shard shape in '%s': first was %s, other was %s",
-                             name.c_str(), falcon_format_tensor_shape(first_shard.ne).c_str(), falcon_format_tensor_shape(shard.ne).c_str());
+                             name.c_str(), bonsai_format_tensor_shape(first_shard.ne).c_str(), bonsai_format_tensor_shape(shard.ne).c_str());
             }
         }
         ne = first_shard.ne;
@@ -404,31 +404,31 @@ struct falcon_load_tensor {
     }
 
     void calc_size() {
-        size = falcon_calc_tensor_size(ne, type);
+        size = bonsai_calc_tensor_size(ne, type);
     }
 };
 
-struct falcon_load_tensors_map {
+struct bonsai_load_tensors_map {
     // tensors is kept in a separate vector to preserve file order
-    std::vector<falcon_load_tensor> tensors;
+    std::vector<bonsai_load_tensor> tensors;
     std::unordered_map<std::string, size_t> name_to_idx;
 };
 
-enum falcon_file_version {
-    FALCON_FILE_VERSION_GGML,
-    FALCON_FILE_VERSION_GGMF_V1, // added version field and scores in vocab
-    FALCON_FILE_VERSION_GGJT_V1, // added padding
+enum bonsai_file_version {
+    BONSAI_FILE_VERSION_GGML,
+    BONSAI_FILE_VERSION_GGMF_V1, // added version field and scores in vocab
+    BONSAI_FILE_VERSION_GGJT_V1, // added padding
 };
 
-struct falcon_file_loader {
+struct bonsai_file_loader {
     arch_util_file file;
-    falcon_file_version file_version;
-    falcon_hparams hparams;
-    falcon_vocab vocab;
+    bonsai_file_version file_version;
+    bonsai_hparams hparams;
+    bonsai_vocab vocab;
 
-    falcon_file_loader(const char * fname, size_t file_idx, falcon_load_tensors_map & tensors_map)
+    bonsai_file_loader(const char * fname, size_t file_idx, bonsai_load_tensors_map & tensors_map)
         : file(fname, "rb") {
-        fprintf(stderr, "falcon.cpp: loading model from %s\n", fname);
+        fprintf(stderr, "bonsai.cpp: loading model from %s\n", fname);
         read_magic();
         read_hparams();
         read_vocab();
@@ -443,11 +443,11 @@ struct falcon_file_loader {
         }
 
         if (magic == 'ggml' && version == 0) {
-            file_version = FALCON_FILE_VERSION_GGML;
+            file_version = BONSAI_FILE_VERSION_GGML;
         } else if (magic == 'ggmf' && version == 1) {
-            file_version = FALCON_FILE_VERSION_GGMF_V1;
+            file_version = BONSAI_FILE_VERSION_GGMF_V1;
         } else if (magic == 'ggjt' && version == 1) {
-            file_version = FALCON_FILE_VERSION_GGJT_V1;
+            file_version = BONSAI_FILE_VERSION_GGJT_V1;
         } else {
             throw format("unknown (magic, version) combination: %08x, %08x; is this really a GGML file?",
                          magic, version);
@@ -461,7 +461,7 @@ struct falcon_file_loader {
         hparams.n_layer = file.read_u32();
         //hparams.n_rot = file.read_u32();
         hparams.parallel_attn = file.read_u32();
-        hparams.ftype = (enum falcon_ftype) file.read_u32();
+        hparams.ftype = (enum bonsai_ftype) file.read_u32();
     }
     void read_vocab() {
         vocab.id_to_token.resize(hparams.n_vocab);
@@ -471,7 +471,7 @@ struct falcon_file_loader {
             std::string word = file.read_string(len);
 
             float score = 0.0f;
-            if (file_version >= FALCON_FILE_VERSION_GGMF_V1) {
+            if (file_version >= BONSAI_FILE_VERSION_GGMF_V1) {
                 file.read_raw(&score, sizeof(score));
             }
 
@@ -482,9 +482,9 @@ struct falcon_file_loader {
             tok_score.score = score;
         }
     }
-    void read_tensor_metadata(size_t file_idx, falcon_load_tensors_map & tensors_map) {
+    void read_tensor_metadata(size_t file_idx, bonsai_load_tensors_map & tensors_map) {
         while (file.tell() < file.size) {
-            falcon_load_tensor_shard shard;
+            bonsai_load_tensor_shard shard;
             uint32_t n_dims = file.read_u32();
             uint32_t name_len = file.read_u32();
             shard.type = (enum ggml_type) file.read_u32();
@@ -492,7 +492,7 @@ struct falcon_file_loader {
             file.read_raw(shard.ne.data(), sizeof(shard.ne[0]) * n_dims);
             std::string name = file.read_string(name_len);
             if (n_dims < 1 || n_dims > 2) {
-                throw format("falcon.cpp: tensor '%s' should not be %u-dimensional", name.c_str(), n_dims);
+                throw format("bonsai.cpp: tensor '%s' should not be %u-dimensional", name.c_str(), n_dims);
             }
             switch (shard.type) {
                 case GGML_TYPE_F32:
@@ -508,7 +508,7 @@ struct falcon_file_loader {
                 }
             }
 
-            if (file_version >= FALCON_FILE_VERSION_GGJT_V1) {
+            if (file_version >= BONSAI_FILE_VERSION_GGJT_V1) {
                 // skip to the next multiple of 32 bytes
                 file.seek(-file.tell() & 31, SEEK_CUR);
             }
@@ -534,10 +534,10 @@ struct falcon_file_loader {
 
 struct arch_util_file_saver {
     arch_util_file file;
-    falcon_file_loader * any_file_loader;
-    arch_util_file_saver(const char * fname, falcon_file_loader * any_file_loader, enum falcon_ftype new_ftype)
+    bonsai_file_loader * any_file_loader;
+    arch_util_file_saver(const char * fname, bonsai_file_loader * any_file_loader, enum bonsai_ftype new_ftype)
         : file(fname, "wb"), any_file_loader(any_file_loader) {
-        fprintf(stderr, "falcon.cpp: saving model to %s\n", fname);
+        fprintf(stderr, "bonsai.cpp: saving model to %s\n", fname);
         write_magic();
         write_hparams(new_ftype);
         write_vocab();
@@ -546,8 +546,8 @@ struct arch_util_file_saver {
         file.write_u32('ggjt'); // magic
         file.write_u32(1); // version
     }
-    void write_hparams(enum falcon_ftype new_ftype) {
-        const falcon_hparams & hparams = any_file_loader->hparams;
+    void write_hparams(enum bonsai_ftype new_ftype) {
+        const bonsai_hparams & hparams = any_file_loader->hparams;
         file.write_u32(hparams.n_vocab);
         //file.write_u32(hparams.n_ctx);
         file.write_u32(hparams.n_embd);
@@ -558,8 +558,8 @@ struct arch_util_file_saver {
         file.write_u32(new_ftype);
     }
     void write_vocab() {
-        if (any_file_loader->file_version == FALCON_FILE_VERSION_GGML) {
-            fprintf(stderr, "falcon.cpp: WARNING: input is an old file that doesn't have scores; will add dummy scores\n");
+        if (any_file_loader->file_version == BONSAI_FILE_VERSION_GGML) {
+            fprintf(stderr, "bonsai.cpp: WARNING: input is an old file that doesn't have scores; will add dummy scores\n");
         }
         uint32_t n_vocab = any_file_loader->hparams.n_vocab;
         for (uint32_t i = 0; i < n_vocab; i++) {
@@ -569,7 +569,7 @@ struct arch_util_file_saver {
             file.write_raw(&token_score.score, sizeof(token_score.score));
         }
     }
-    void write_tensor(falcon_load_tensor & tensor, enum ggml_type new_type, const void * new_data, size_t new_size) {
+    void write_tensor(bonsai_load_tensor & tensor, enum ggml_type new_type, const void * new_data, size_t new_size) {
         switch (new_type) {
             case GGML_TYPE_F32:
             case GGML_TYPE_F16:
@@ -587,47 +587,47 @@ struct arch_util_file_saver {
         file.write_raw(tensor.ne.data(), sizeof(tensor.ne[0]) * tensor.ne.size());
         file.write_raw(tensor.name.data(), tensor.name.size());
         file.seek(-file.tell() & 31, SEEK_CUR);
-        ARCH_ASSERT(new_size == falcon_calc_tensor_size(tensor.ne, new_type));
+        ARCH_ASSERT(new_size == bonsai_calc_tensor_size(tensor.ne, new_type));
         file.write_raw(new_data, new_size);
     }
 };
 
-struct falcon_model_loader {
-    std::vector<std::unique_ptr<falcon_file_loader>> file_loaders;
-    falcon_load_tensors_map tensors_map;
+struct bonsai_model_loader {
+    std::vector<std::unique_ptr<bonsai_file_loader>> file_loaders;
+    bonsai_load_tensors_map tensors_map;
     bool use_mmap;
     size_t num_ggml_tensors_created = 0;
     struct ggml_context * ggml_ctx = NULL;
     std::unique_ptr<arch_util_mmap> mapping;
 
-    falcon_model_loader(const std::string & fname_base, bool use_mmap, bool vocab_only) {
-        auto first_file = new falcon_file_loader(fname_base.c_str(), 0, tensors_map);
+    bonsai_model_loader(const std::string & fname_base, bool use_mmap, bool vocab_only) {
+        auto first_file = new bonsai_file_loader(fname_base.c_str(), 0, tensors_map);
         file_loaders.emplace_back(first_file);
         uint32_t n_parts = 1;
         for (uint32_t i = 1; i < n_parts; i++) {
             std::string fname = fname_base + "." + std::to_string(i);
-            auto ith_file = new falcon_file_loader(fname.c_str(), i, tensors_map);
+            auto ith_file = new bonsai_file_loader(fname.c_str(), i, tensors_map);
             file_loaders.emplace_back(ith_file);
             if (ith_file->hparams != first_file->hparams) {
-                throw format("falcon.cpp: hparams inconsistent between files");
+                throw format("bonsai.cpp: hparams inconsistent between files");
             }
         }
         if (!arch_util_mmap::SUPPORTED) {
             use_mmap = false;
         }
         if (use_mmap && alignment_prevents_mmap()) {
-            fprintf(stderr, "falcon.cpp: can't use mmap because tensors are not aligned; convert to new format to avoid this\n");
+            fprintf(stderr, "bonsai.cpp: can't use mmap because tensors are not aligned; convert to new format to avoid this\n");
             use_mmap = false;
         }
         this->use_mmap = use_mmap;
-        for (falcon_load_tensor & lt : tensors_map.tensors) {
+        for (bonsai_load_tensor & lt : tensors_map.tensors) {
             lt.calc_all();
         }
     }
 
     bool alignment_prevents_mmap() {
-        for (const falcon_load_tensor & lt : tensors_map.tensors) {
-            for (const falcon_load_tensor_shard & shard : lt.shards) {
+        for (const bonsai_load_tensor & lt : tensors_map.tensors) {
+            for (const bonsai_load_tensor_shard & shard : lt.shards) {
                 if (shard.file_off & 3) {
                     return true;
                 }
@@ -638,7 +638,7 @@ struct falcon_model_loader {
 
     void calc_sizes(size_t * ctx_size_p, size_t * mmapped_size_p) const {
         *ctx_size_p = *mmapped_size_p = 0;
-        for (const falcon_load_tensor & lt : tensors_map.tensors) {
+        for (const bonsai_load_tensor & lt : tensors_map.tensors) {
             *ctx_size_p += sizeof(struct ggml_tensor) + GGML_OBJECT_SIZE;
             *(use_mmap ? mmapped_size_p : ctx_size_p) += lt.size;
         }
@@ -647,23 +647,23 @@ struct falcon_model_loader {
     struct ggml_tensor * get_tensor(const std::string & name, std::vector<uint32_t> ne) {
         auto it = tensors_map.name_to_idx.find(name);
         if (it == tensors_map.name_to_idx.end()) {
-            throw format("falcon.cpp: tensor '%s' is missing from model", name.c_str());
+            throw format("bonsai.cpp: tensor '%s' is missing from model", name.c_str());
         }
-        falcon_load_tensor & lt = tensors_map.tensors.at(it->second);
+        bonsai_load_tensor & lt = tensors_map.tensors.at(it->second);
         if (lt.ne != ne) {
-            throw format("falcon.cpp: tensor '%s' has wrong shape; expected %s, got %s",
-                         name.c_str(), falcon_format_tensor_shape(ne).c_str(), falcon_format_tensor_shape(lt.ne).c_str());
+            throw format("bonsai.cpp: tensor '%s' has wrong shape; expected %s, got %s",
+                         name.c_str(), bonsai_format_tensor_shape(ne).c_str(), bonsai_format_tensor_shape(lt.ne).c_str());
         }
         
         printf("%48s - %14s, type = %4s\n",
                lt.name.c_str(),
-               falcon_format_tensor_shape(lt.ne).c_str(),
+               bonsai_format_tensor_shape(lt.ne).c_str(),
                ggml_type_name(lt.type));
 
         return get_tensor_for(lt);
     }
 
-    struct ggml_tensor * get_tensor_for(falcon_load_tensor & lt) {
+    struct ggml_tensor * get_tensor_for(bonsai_load_tensor & lt) {
         struct ggml_tensor * tensor;
         if (lt.ne.size() == 2) {
             tensor = ggml_new_tensor_2d(ggml_ctx, lt.type, lt.ne.at(0), lt.ne.at(1));
@@ -679,13 +679,13 @@ struct falcon_model_loader {
 
     void done_getting_tensors() {
         if (num_ggml_tensors_created != tensors_map.tensors.size()) {
-            throw std::string("falcon.cpp: file contained more tensors than expected");
+            throw std::string("bonsai.cpp: file contained more tensors than expected");
         }
     }
 
-    void load_all_data(falcon_progress_callback progress_callback, void *  progress_callback_user_data, arch_util_mlock * lmlock) {
+    void load_all_data(bonsai_progress_callback progress_callback, void *  progress_callback_user_data, arch_util_mlock * lmlock) {
         size_t data_size = 0;
-        for (const falcon_load_tensor & lt : tensors_map.tensors) {
+        for (const bonsai_load_tensor & lt : tensors_map.tensors) {
             data_size += lt.size;
         }
 
@@ -702,7 +702,7 @@ struct falcon_model_loader {
         }
 
         size_t done_size = 0;
-        for (falcon_load_tensor & lt : tensors_map.tensors) {
+        for (bonsai_load_tensor & lt : tensors_map.tensors) {
             if (progress_callback) {
                 progress_callback((float) done_size / data_size, progress_callback_user_data);
             }
@@ -720,7 +720,7 @@ struct falcon_model_loader {
         }
     }
 
-    void load_data_for(falcon_load_tensor & lt) {
+    void load_data_for(bonsai_load_tensor & lt) {
         if (use_mmap) {
             ARCH_ASSERT(lt.shards.size() == 1);
             lt.data = (uint8_t *) mapping->addr + lt.shards.at(0).file_off;
@@ -730,7 +730,7 @@ struct falcon_model_loader {
             file.read_raw(lt.data, lt.size);
         } else if (lt.split_type == SPLIT_BY_ROWS) {
             size_t offset = 0;
-            for (falcon_load_tensor_shard & shard : lt.shards) {
+            for (bonsai_load_tensor_shard & shard : lt.shards) {
                 arch_util_file & file = file_loaders.at(shard.file_idx)->file;
                 file.seek(shard.file_off, SEEK_SET);
                 file.read_raw(lt.data + offset, shard.size);
@@ -742,7 +742,7 @@ struct falcon_model_loader {
             std::vector<arch_util_buffer> tmp_bufs;
             tmp_bufs.resize(lt.shards.size());
             for (size_t i = 0; i < lt.shards.size(); i++) {
-                falcon_load_tensor_shard & shard = lt.shards.at(i);
+                bonsai_load_tensor_shard & shard = lt.shards.at(i);
                 arch_util_file & file = file_loaders.at(shard.file_idx)->file;
                 file.seek(shard.file_off, SEEK_SET);
                 tmp_bufs.at(i).resize(shard.size);
@@ -767,14 +767,14 @@ struct falcon_model_loader {
         }
     }
 
-    static void print_checksum(falcon_load_tensor & lt) {
+    static void print_checksum(bonsai_load_tensor & lt) {
         uint32_t sum = 0;
         for (size_t i = 0; i < lt.size; i++) {
             uint8_t byte = lt.data[i];
             sum = byte + (sum << 6) + (sum << 16) - sum; // sdbm hash
         }
         fprintf(stderr, "%s checksum: %#08x (%s, size %zu)\n", lt.name.c_str(), sum,
-                falcon_format_tensor_shape(lt.ne).c_str(), lt.size);
+                bonsai_format_tensor_shape(lt.ne).c_str(), lt.size);
     }
 
 };
@@ -785,8 +785,8 @@ struct falcon_model_loader {
 //
 
 static bool kv_cache_init(
-        const struct falcon_hparams & hparams,
-             struct falcon_kv_cache & cache,
+        const struct bonsai_hparams & hparams,
+             struct bonsai_kv_cache & cache,
                            ggml_type   wtype,
                                  int   n_ctx) {
     const int n_embd  = hparams.n_embd;
@@ -815,8 +815,8 @@ static bool kv_cache_init(
     return true;
 }
 
-struct falcon_context_params falcon_context_default_params() {
-    struct falcon_context_params result = {
+struct bonsai_context_params bonsai_context_default_params() {
+    struct bonsai_context_params result = {
         /*.seed                        =*/ DEFAULT_SEED,
         /*.n_ctx                       =*/ 512,
         /*.n_batch                     =*/ 512,
@@ -833,11 +833,11 @@ struct falcon_context_params falcon_context_default_params() {
     return result;
 }
 
-bool falcon_mmap_supported() {
+bool bonsai_mmap_supported() {
     return arch_util_mmap::SUPPORTED;
 }
 
-bool falcon_mlock_supported() {
+bool bonsai_mlock_supported() {
     return arch_util_mlock::SUPPORTED;
 }
 
@@ -845,33 +845,33 @@ bool falcon_mlock_supported() {
 // model loading
 //
 
-static const char *falcon_file_version_name(falcon_file_version version) {
+static const char *bonsai_file_version_name(bonsai_file_version version) {
     switch (version) {
-        case FALCON_FILE_VERSION_GGML: return "'ggml' (old version with low tokenizer quality and no mmap support)";
-        case FALCON_FILE_VERSION_GGMF_V1: return "ggmf v1 (old version with no mmap support)";
-        case FALCON_FILE_VERSION_GGJT_V1: return "ggjt v1 (latest)";
+        case BONSAI_FILE_VERSION_GGML: return "'ggml' (old version with low tokenizer quality and no mmap support)";
+        case BONSAI_FILE_VERSION_GGMF_V1: return "ggmf v1 (old version with no mmap support)";
+        case BONSAI_FILE_VERSION_GGJT_V1: return "ggjt v1 (latest)";
         default: ARCH_ASSERT(false);
     }
 }
 
-static const char *falcon_ftype_name(enum falcon_ftype ftype) {
+static const char *bonsai_ftype_name(enum bonsai_ftype ftype) {
     switch (ftype) {
-        case FALCON_FTYPE_ALL_F32:     return "all F32";
-        case FALCON_FTYPE_MOSTLY_F16:  return "mostly F16";
-        case FALCON_FTYPE_MOSTLY_Q4_0: return "mostly Q4_0";
-        case FALCON_FTYPE_MOSTLY_Q4_1: return "mostly Q4_1";
-        case FALCON_FTYPE_MOSTLY_Q4_1_SOME_F16:
+        case BONSAI_FTYPE_ALL_F32:     return "all F32";
+        case BONSAI_FTYPE_MOSTLY_F16:  return "mostly F16";
+        case BONSAI_FTYPE_MOSTLY_Q4_0: return "mostly Q4_0";
+        case BONSAI_FTYPE_MOSTLY_Q4_1: return "mostly Q4_1";
+        case BONSAI_FTYPE_MOSTLY_Q4_1_SOME_F16:
                                       return "mostly Q4_1, some F16";
-        case FALCON_FTYPE_MOSTLY_Q4_2: return "mostly Q4_2";
-        //case FALCON_FTYPE_MOSTLY_Q4_3: return "mostly Q4_3";
-        case FALCON_FTYPE_MOSTLY_Q5_0: return "mostly Q5_0";
-        case FALCON_FTYPE_MOSTLY_Q5_1: return "mostly Q5_1";
-        case FALCON_FTYPE_MOSTLY_Q8_0: return "mostly Q8_0";
+        case BONSAI_FTYPE_MOSTLY_Q4_2: return "mostly Q4_2";
+        //case BONSAI_FTYPE_MOSTLY_Q4_3: return "mostly Q4_3";
+        case BONSAI_FTYPE_MOSTLY_Q5_0: return "mostly Q5_0";
+        case BONSAI_FTYPE_MOSTLY_Q5_1: return "mostly Q5_1";
+        case BONSAI_FTYPE_MOSTLY_Q8_0: return "mostly Q8_0";
         default:                      return "unknown, may not work";
     }
 }
 
-static const char *falcon_model_type_name(e_model type) {
+static const char *bonsai_model_type_name(e_model type) {
     switch (type) {
         case MODEL_3B: return "3B";
         case MODEL_7B: return "7B";
@@ -882,25 +882,25 @@ static const char *falcon_model_type_name(e_model type) {
     }
 }
 
-static void falcon_model_load_internal(
+static void bonsai_model_load_internal(
         const std::string & fname,
-        falcon_context & lctx,
+        bonsai_context & lctx,
         int n_ctx,
         ggml_type memory_type,
         bool use_mmap,
         bool use_mlock,
         bool vocab_only,
-        falcon_progress_callback progress_callback,
+        bonsai_progress_callback progress_callback,
         void * progress_callback_user_data) {
 
     lctx.t_start_us = ggml_time_us();
 
-    std::unique_ptr<falcon_model_loader> ml(new falcon_model_loader(fname, use_mmap, vocab_only));
+    std::unique_ptr<bonsai_model_loader> ml(new bonsai_model_loader(fname, use_mmap, vocab_only));
 
     lctx.vocab = std::move(ml->file_loaders.at(0)->vocab);
     auto & model = lctx.model;
     model.hparams = ml->file_loaders.at(0)->hparams;
-    falcon_file_version file_version = ml->file_loaders.at(0)->file_version;
+    bonsai_file_version file_version = ml->file_loaders.at(0)->file_version;
     auto & hparams = model.hparams;
     
     {
@@ -921,7 +921,7 @@ static void falcon_model_load_internal(
     }
 
     {
-        fprintf(stderr, "%s: format     = %s\n",  __func__, falcon_file_version_name(file_version));
+        fprintf(stderr, "%s: format     = %s\n",  __func__, bonsai_file_version_name(file_version));
         fprintf(stderr, "%s: n_vocab    = %u\n",  __func__, hparams.n_vocab);
         fprintf(stderr, "%s: n_ctx      = %u\n",  __func__, hparams.n_ctx);
         fprintf(stderr, "%s: n_embd     = %u\n",  __func__, hparams.n_embd);
@@ -929,9 +929,9 @@ static void falcon_model_load_internal(
         fprintf(stderr, "%s: n_layer    = %u\n",  __func__, hparams.n_layer);
         //fprintf(stderr, "%s: n_rot      = %u\n",  __func__, hparams.n_rot);
         fprintf(stderr, "%s: parallel_attn = %d\n", __func__, hparams.parallel_attn);
-        fprintf(stderr, "%s: ftype      = %u (%s)\n", __func__, hparams.ftype, falcon_ftype_name(hparams.ftype));
+        fprintf(stderr, "%s: ftype      = %u (%s)\n", __func__, hparams.ftype, bonsai_ftype_name(hparams.ftype));
         fprintf(stderr, "%s: n_parts    = %zu\n", __func__, ml->file_loaders.size());
-        fprintf(stderr, "%s: model size = %s\n",  __func__, falcon_model_type_name(model.type));
+        fprintf(stderr, "%s: model size = %s\n",  __func__, bonsai_model_type_name(model.type));
     }
 
     if (vocab_only) {
@@ -956,7 +956,7 @@ static void falcon_model_load_internal(
             MEM_REQ_SCRATCH1().at(model.type) +
             MEM_REQ_EVAL().at(model.type);
 
-        // this is the memory required by one falcon_state
+        // this is the memory required by one bonsai_state
         const size_t mem_required_state =
             scale*MEM_REQ_KV_SELF().at(model.type);
 
@@ -1030,7 +1030,7 @@ static void falcon_model_load_internal(
     ml->done_getting_tensors();
 
     // populate `tensors_by_name`
-    for (falcon_load_tensor & lt : ml->tensors_map.tensors) {
+    for (bonsai_load_tensor & lt : ml->tensors_map.tensors) {
         model.tensors_by_name.emplace_back(lt.name, lt.ggml_tensor);
     }
 
@@ -1043,18 +1043,18 @@ static void falcon_model_load_internal(
     lctx.t_load_us = ggml_time_us() - lctx.t_start_us;
 }
 
-static bool falcon_model_load(
+static bool bonsai_model_load(
         const std::string & fname,
-        falcon_context & lctx,
+        bonsai_context & lctx,
         int n_ctx,
         ggml_type memory_type,
         bool use_mmap,
         bool use_mlock,
         bool vocab_only,
-        falcon_progress_callback progress_callback,
+        bonsai_progress_callback progress_callback,
         void *progress_callback_user_data) {
     try {
-        falcon_model_load_internal(fname, lctx, n_ctx, memory_type, use_mmap, use_mlock,
+        bonsai_model_load_internal(fname, lctx, n_ctx, memory_type, use_mmap, use_mlock,
                                   vocab_only, progress_callback, progress_callback_user_data);
         return true;
     } catch (const std::string & err) {
@@ -1064,7 +1064,7 @@ static bool falcon_model_load(
 }
 
 // For optimizing
-static void falcon_model_set_param(falcon_context & lctx) {
+static void bonsai_model_set_param(bonsai_context & lctx) {
     auto & model = lctx.model;
     struct ggml_context* ctx = model.ctx;
     const auto & hparams = model.hparams;
@@ -1104,7 +1104,7 @@ static void falcon_model_set_param(falcon_context & lctx) {
 // Helpers
 
 static inline struct ggml_tensor * layer_norm(ggml_context * ctx, struct ggml_tensor * x, struct ggml_tensor * weight, struct ggml_tensor * bias) {
-    // LayerNorm in falcon is `x = (x - mean(x)) / sqrt(variance(x) + 1e-5) * weight + bias`
+    // LayerNorm in bonsai is `x = (x - mean(x)) / sqrt(variance(x) + 1e-5) * weight + bias`
     // Looks like ggml_norm does the first part, we only need to apply weight & bias.
     struct ggml_tensor * cur = ggml_norm(ctx, x);
     return ggml_add_inplace(ctx,
@@ -1121,9 +1121,9 @@ static inline struct ggml_tensor * layer_norm(ggml_context * ctx, struct ggml_te
 //   - n_past:    the context size so far
 //   - n_threads: number of threads to use
 //
-static bool falcon_eval_internal(
-        falcon_context & lctx,
-    const falcon_token * tokens,
+static bool bonsai_eval_internal(
+        bonsai_context & lctx,
+    const bonsai_token * tokens,
             const int   n_tokens,
             const int   n_past,
             const int   n_threads) {
@@ -1174,7 +1174,7 @@ static bool falcon_eval_internal(
     struct ggml_tensor * inpL = ggml_get_rows(ctx, model.wte, embd);
 
     for (int i = 0; i < n_layer; ++i) {
-        struct falcon_layer & layer = model.layers[i];
+        struct bonsai_layer & layer = model.layers[i];
         
         lctx.use_buf(ctx, 0);
 
@@ -1226,7 +1226,7 @@ static bool falcon_eval_internal(
             Kcur = ggml_repeat(ctx, Kcur, Qcur);
             Vcur = ggml_repeat(ctx, Vcur, Qcur);
             
-            // MARK: gptneox RoPE Q and K, before cache (falcon uses gptneox style)
+            // MARK: gptneox RoPE Q and K, before cache (bonsai uses gptneox style)
             // Bit 2 for gptneox style (2)
             // Bit 1 is zero for dont skip n_past +(0), use (2+1) = (3) if rope is applied to cache of k (after cache only)
             //Qcur = ggml_rope(ctx, Qcur, n_past, n_rot, 2);
@@ -1475,7 +1475,7 @@ static size_t utf8_len(char src) {
     return lookup[highbits];
 }
 
-struct falcon_sp_symbol {
+struct bonsai_sp_symbol {
     using index = int;
     index prev;
     index next;
@@ -1483,31 +1483,31 @@ struct falcon_sp_symbol {
     size_t n;
 };
 
-struct falcon_sp_bigram {
+struct bonsai_sp_bigram {
     struct comparator {
-        bool operator()(falcon_sp_bigram & l, falcon_sp_bigram & r) {
+        bool operator()(bonsai_sp_bigram & l, bonsai_sp_bigram & r) {
             return (l.score < r.score) || (l.score == r.score && l.left > r.left);
         }
     };
-    using queue_storage = std::vector<falcon_sp_bigram>;
-    using queue = std::priority_queue<falcon_sp_bigram, queue_storage, comparator>;
-    falcon_sp_symbol::index left;
-    falcon_sp_symbol::index right;
+    using queue_storage = std::vector<bonsai_sp_bigram>;
+    using queue = std::priority_queue<bonsai_sp_bigram, queue_storage, comparator>;
+    bonsai_sp_symbol::index left;
+    bonsai_sp_symbol::index right;
     float score;
     size_t size;
 };
 
 // original implementation:
 // https://github.com/ggerganov/llama.cpp/commit/074bea2eb1f1349a0118239c4152914aecaa1be4
-struct falcon_tokenizer {
-    falcon_tokenizer(const falcon_vocab & vocab): vocab_(vocab) {}
+struct bonsai_tokenizer {
+    bonsai_tokenizer(const bonsai_vocab & vocab): vocab_(vocab) {}
 
-    void tokenize(const std::string & text, std::vector<falcon_vocab::id> & output) {
+    void tokenize(const std::string & text, std::vector<bonsai_vocab::id> & output) {
         // split string into utf8 chars
         int index = 0;
         size_t offs = 0;
         while (offs < text.size()) {
-            falcon_sp_symbol sym;
+            bonsai_sp_symbol sym;
             size_t char_len = std::min(text.size() - offs, utf8_len(text[offs]));
             sym.text = text.c_str() + offs;
             sym.n = char_len;
@@ -1561,7 +1561,7 @@ struct falcon_tokenizer {
             if (token == vocab_.token_to_id.end()) {
                 // output any symbols that did not form tokens as bytes.
                 for (int j = 0; j < (int) symbol.n; ++j) {
-                    falcon_vocab::id token_id = static_cast<uint8_t>(symbol.text[j]) + 3;
+                    bonsai_vocab::id token_id = static_cast<uint8_t>(symbol.text[j]) + 3;
                     output.push_back(token_id);
                 }
             } else {
@@ -1589,7 +1589,7 @@ private:
 
         const auto &tok_score = vocab_.id_to_token[(*token).second];
 
-        falcon_sp_bigram bigram;
+        bonsai_sp_bigram bigram;
         bigram.left = left;
         bigram.right = right;
         bigram.score = tok_score.score;
@@ -1597,21 +1597,21 @@ private:
         work_queue_.push(bigram);
     }
 
-    const falcon_vocab & vocab_;
-    std::vector<falcon_sp_symbol> symbols_;
-    falcon_sp_bigram::queue work_queue_;
+    const bonsai_vocab & vocab_;
+    std::vector<bonsai_sp_symbol> symbols_;
+    bonsai_sp_bigram::queue work_queue_;
 };
 
-static std::vector<falcon_vocab::id> falcon_tokenize(const falcon_vocab & vocab, const std::string & text, bool bos) {
-    falcon_tokenizer tokenizer(vocab);
-    std::vector<falcon_vocab::id> output;
+static std::vector<bonsai_vocab::id> bonsai_tokenize(const bonsai_vocab & vocab, const std::string & text, bool bos) {
+    bonsai_tokenizer tokenizer(vocab);
+    std::vector<bonsai_vocab::id> output;
 
     if (text.size() == 0) {
         return output;
     }
 
     if (bos) {
-        output.push_back(falcon_token_bos());
+        output.push_back(bonsai_token_bos());
     }
 
     tokenizer.tokenize(text, output);
@@ -1622,14 +1622,14 @@ static std::vector<falcon_vocab::id> falcon_tokenize(const falcon_vocab & vocab,
 // sampling
 //
 
-void falcon_sample_softmax(struct falcon_context * ctx, falcon_token_data_array * candidates) {
+void bonsai_sample_softmax(struct bonsai_context * ctx, bonsai_token_data_array * candidates) {
     assert(candidates->size > 0);
 
     const int64_t t_start_sample_us = ggml_time_us();
 
     // Sort the logits in descending order
     if (!candidates->sorted) {
-        std::sort(candidates->data, candidates->data + candidates->size, [](const falcon_token_data & a, const falcon_token_data & b) {
+        std::sort(candidates->data, candidates->data + candidates->size, [](const bonsai_token_data & a, const bonsai_token_data & b) {
             return a.logit > b.logit;
         });
         candidates->sorted = true;
@@ -1651,7 +1651,7 @@ void falcon_sample_softmax(struct falcon_context * ctx, falcon_token_data_array 
     }
 }
 
-void falcon_sample_top_k(struct falcon_context * ctx, falcon_token_data_array * candidates, int k, size_t min_keep) {
+void bonsai_sample_top_k(struct bonsai_context * ctx, bonsai_token_data_array * candidates, int k, size_t min_keep) {
     const int64_t t_start_sample_us = ggml_time_us();
 
     k = std::max(k, (int) min_keep);
@@ -1659,7 +1659,7 @@ void falcon_sample_top_k(struct falcon_context * ctx, falcon_token_data_array * 
 
     // Sort scores in descending order
     if (!candidates->sorted) {
-        auto comp = [](const falcon_token_data & a, const falcon_token_data & b) {
+        auto comp = [](const bonsai_token_data & a, const bonsai_token_data & b) {
             return a.logit > b.logit;
         };
         if (k == (int) candidates->size) {
@@ -1676,14 +1676,14 @@ void falcon_sample_top_k(struct falcon_context * ctx, falcon_token_data_array * 
     }
 }
 
-void falcon_sample_top_p(struct falcon_context * ctx, falcon_token_data_array * candidates, float p, size_t min_keep) {
+void bonsai_sample_top_p(struct bonsai_context * ctx, bonsai_token_data_array * candidates, float p, size_t min_keep) {
     if (p >= 1.0f) {
         return;
     }
 
     const int64_t t_start_sample_us = ggml_time_us();
 
-    falcon_sample_softmax(ctx, candidates);
+    bonsai_sample_softmax(ctx, candidates);
 
     // Compute the cumulative probabilities
     float cum_sum = 0.0f;
@@ -1707,14 +1707,14 @@ void falcon_sample_top_p(struct falcon_context * ctx, falcon_token_data_array * 
     }
 }
 
-void falcon_sample_tail_free(struct falcon_context * ctx, falcon_token_data_array * candidates, float z, size_t min_keep) {
+void bonsai_sample_tail_free(struct bonsai_context * ctx, bonsai_token_data_array * candidates, float z, size_t min_keep) {
     if (z >= 1.0f || candidates->size <= 2) {
         return;
     }
 
     const int64_t t_start_sample_us = ggml_time_us();
 
-    falcon_sample_softmax(nullptr, candidates);
+    bonsai_sample_softmax(nullptr, candidates);
 
     // Compute the first and second derivatives
     std::vector<float> first_derivatives(candidates->size - 1);
@@ -1759,7 +1759,7 @@ void falcon_sample_tail_free(struct falcon_context * ctx, falcon_token_data_arra
 }
 
 
-void falcon_sample_typical(struct falcon_context * ctx, falcon_token_data_array * candidates, float p, size_t min_keep) {
+void bonsai_sample_typical(struct bonsai_context * ctx, bonsai_token_data_array * candidates, float p, size_t min_keep) {
     // Reference implementation:
     // https://github.com/huggingface/transformers/compare/main...cimeister:typical-sampling:typical-pr
     if (p >= 1.0f) {
@@ -1769,7 +1769,7 @@ void falcon_sample_typical(struct falcon_context * ctx, falcon_token_data_array 
     const int64_t t_start_sample_us = ggml_time_us();
 
     // Compute the softmax of logits and calculate entropy
-    falcon_sample_softmax(nullptr, candidates);
+    bonsai_sample_softmax(nullptr, candidates);
 
     float entropy = 0.0f;
     for (size_t i = 0; i < candidates->size; ++i) {
@@ -1807,7 +1807,7 @@ void falcon_sample_typical(struct falcon_context * ctx, falcon_token_data_array 
     }
 
     // Resize the output vector to keep only the locally typical tokens
-    std::vector<falcon_token_data> new_candidates;
+    std::vector<bonsai_token_data> new_candidates;
     for (size_t i = 0; i < last_idx; ++i) {
         size_t idx = indices[i];
         new_candidates.push_back(candidates->data[idx]);
@@ -1822,7 +1822,7 @@ void falcon_sample_typical(struct falcon_context * ctx, falcon_token_data_array 
     }
 }
 
-void falcon_sample_temperature(struct falcon_context * ctx, falcon_token_data_array * candidates_p, float temp) {
+void bonsai_sample_temperature(struct bonsai_context * ctx, bonsai_token_data_array * candidates_p, float temp) {
     const int64_t t_start_sample_us = ggml_time_us();
 
     for (size_t i = 0; i < candidates_p->size; ++i) {
@@ -1834,7 +1834,7 @@ void falcon_sample_temperature(struct falcon_context * ctx, falcon_token_data_ar
     }
 }
 
-void falcon_sample_repetition_penalty(struct falcon_context * ctx, falcon_token_data_array * candidates, falcon_token * last_tokens, size_t last_tokens_size, float penalty) {
+void bonsai_sample_repetition_penalty(struct bonsai_context * ctx, bonsai_token_data_array * candidates, bonsai_token * last_tokens, size_t last_tokens_size, float penalty) {
     if (last_tokens_size == 0 || penalty == 1.0f) {
         return;
     }
@@ -1863,7 +1863,7 @@ void falcon_sample_repetition_penalty(struct falcon_context * ctx, falcon_token_
     }
 }
 
-void falcon_sample_frequency_and_presence_penalties(struct falcon_context * ctx, falcon_token_data_array * candidates, falcon_token * last_tokens_p, size_t last_tokens_size, float alpha_frequency, float alpha_presence) {
+void bonsai_sample_frequency_and_presence_penalties(struct bonsai_context * ctx, bonsai_token_data_array * candidates, bonsai_token * last_tokens_p, size_t last_tokens_size, float alpha_frequency, float alpha_presence) {
     if (last_tokens_size == 0 || (alpha_frequency == 0.0f && alpha_presence == 0.0f)) {
         return;
     }
@@ -1871,7 +1871,7 @@ void falcon_sample_frequency_and_presence_penalties(struct falcon_context * ctx,
     const int64_t t_start_sample_us = ggml_time_us();
 
     // Create a frequency map to count occurrences of each token in last_tokens
-    std::unordered_map<falcon_token, int> token_count;
+    std::unordered_map<bonsai_token, int> token_count;
     for (size_t i = 0; i < last_tokens_size; ++i) {
         token_count[last_tokens_p[i]]++;
     }
@@ -1895,13 +1895,13 @@ void falcon_sample_frequency_and_presence_penalties(struct falcon_context * ctx,
 }
 
 
-falcon_token falcon_sample_token_mirostat(struct falcon_context * ctx, falcon_token_data_array * candidates, float tau, float eta, int m, float * mu) {
+bonsai_token bonsai_sample_token_mirostat(struct bonsai_context * ctx, bonsai_token_data_array * candidates, float tau, float eta, int m, float * mu) {
     assert(ctx);
-    auto N = float(falcon_n_vocab(ctx));
+    auto N = float(bonsai_n_vocab(ctx));
     int64_t t_start_sample_us;
     t_start_sample_us = ggml_time_us();
 
-    falcon_sample_softmax(nullptr, candidates);
+    bonsai_sample_softmax(nullptr, candidates);
 
     // Estimate s_hat using the most probable m tokens
     float s_hat = 0.0;
@@ -1920,15 +1920,15 @@ falcon_token falcon_sample_token_mirostat(struct falcon_context * ctx, falcon_to
     float k = powf((epsilon_hat * powf(2, *mu)) / (1 - powf(N, -epsilon_hat)), 1 / s_hat);
 
     // Sample the next word X using top-k sampling
-    falcon_sample_top_k(nullptr, candidates, int(k), 1);
+    bonsai_sample_top_k(nullptr, candidates, int(k), 1);
     if (ctx) {
         ctx->t_sample_us += ggml_time_us() - t_start_sample_us;
     }
-    falcon_token X = falcon_sample_token(ctx, candidates);
+    bonsai_token X = bonsai_sample_token(ctx, candidates);
     t_start_sample_us = ggml_time_us();
 
     // Compute error as the difference between observed surprise and target surprise value
-    size_t X_idx = std::distance(candidates->data, std::find_if(candidates->data, candidates->data + candidates->size, [&](const falcon_token_data & candidate) {
+    size_t X_idx = std::distance(candidates->data, std::find_if(candidates->data, candidates->data + candidates->size, [&](const bonsai_token_data & candidate) {
         return candidate.id == X;
     }));
     float observed_surprise = -log2f(candidates->data[X_idx].p);
@@ -1944,30 +1944,30 @@ falcon_token falcon_sample_token_mirostat(struct falcon_context * ctx, falcon_to
     return X;
 }
 
-falcon_token falcon_sample_token_mirostat_v2(struct falcon_context * ctx, falcon_token_data_array * candidates, float tau, float eta, float * mu) {
+bonsai_token bonsai_sample_token_mirostat_v2(struct bonsai_context * ctx, bonsai_token_data_array * candidates, float tau, float eta, float * mu) {
     assert(ctx);
     int64_t t_start_sample_us;
     t_start_sample_us = ggml_time_us();
 
-    falcon_sample_softmax(ctx, candidates);
+    bonsai_sample_softmax(ctx, candidates);
 
     // Truncate the words with surprise values greater than mu
-    candidates->size = std::distance(candidates->data, std::find_if(candidates->data, candidates->data + candidates->size, [&](const falcon_token_data & candidate) {
+    candidates->size = std::distance(candidates->data, std::find_if(candidates->data, candidates->data + candidates->size, [&](const bonsai_token_data & candidate) {
         return -log2f(candidate.p) > *mu;
     }));
 
     // Normalize the probabilities of the remaining words
-    falcon_sample_softmax(ctx, candidates);
+    bonsai_sample_softmax(ctx, candidates);
 
     // Sample the next word X from the remaining words
     if (ctx) {
         ctx->t_sample_us += ggml_time_us() - t_start_sample_us;
     }
-    falcon_token X = falcon_sample_token(ctx, candidates);
+    bonsai_token X = bonsai_sample_token(ctx, candidates);
     t_start_sample_us = ggml_time_us();
 
     // Compute error as the difference between observed surprise and target surprise value
-    size_t X_idx = std::distance(candidates->data, std::find_if(candidates->data, candidates->data + candidates->size, [&](const falcon_token_data & candidate) {
+    size_t X_idx = std::distance(candidates->data, std::find_if(candidates->data, candidates->data + candidates->size, [&](const bonsai_token_data & candidate) {
         return candidate.id == X;
     }));
     float observed_surprise = -log2f(candidates->data[X_idx].p);
@@ -1982,15 +1982,15 @@ falcon_token falcon_sample_token_mirostat_v2(struct falcon_context * ctx, falcon
     return X;
 }
 
-falcon_token falcon_sample_token_greedy(struct falcon_context * ctx, falcon_token_data_array * candidates) {
+bonsai_token bonsai_sample_token_greedy(struct bonsai_context * ctx, bonsai_token_data_array * candidates) {
     const int64_t t_start_sample_us = ggml_time_us();
 
     // Find max element
-    auto max_iter = std::max_element(candidates->data, candidates->data + candidates->size, [](const falcon_token_data & a, const falcon_token_data & b) {
+    auto max_iter = std::max_element(candidates->data, candidates->data + candidates->size, [](const bonsai_token_data & a, const bonsai_token_data & b) {
         return a.logit < b.logit;
     });
 
-    falcon_token result = max_iter->id;
+    bonsai_token result = max_iter->id;
     if (ctx) {
         ctx->t_sample_us += ggml_time_us() - t_start_sample_us;
         ctx->n_sample++;
@@ -1998,10 +1998,10 @@ falcon_token falcon_sample_token_greedy(struct falcon_context * ctx, falcon_toke
     return result;
 }
 
-falcon_token falcon_sample_token(struct falcon_context * ctx, falcon_token_data_array * candidates) {
+bonsai_token bonsai_sample_token(struct bonsai_context * ctx, bonsai_token_data_array * candidates) {
     assert(ctx);
     const int64_t t_start_sample_us = ggml_time_us();
-    falcon_sample_softmax(nullptr, candidates);
+    bonsai_sample_softmax(nullptr, candidates);
 
     std::vector<float> probs;
     probs.reserve(candidates->size);
@@ -2013,7 +2013,7 @@ falcon_token falcon_sample_token(struct falcon_context * ctx, falcon_token_data_
     auto & rng = ctx->rng;
     int idx = dist(rng);
 
-    falcon_token result = candidates->data[idx].id;
+    bonsai_token result = candidates->data[idx].id;
 
     ctx->t_sample_us += ggml_time_us() - t_start_sample_us;
     ctx->n_sample++;
@@ -2024,8 +2024,8 @@ falcon_token falcon_sample_token(struct falcon_context * ctx, falcon_token_data_
 // updating
 //
 
-static void falcon_model_update_internal(const std::string & fname_inp, const std::string & fname_out) {
-    std::unique_ptr<falcon_model_loader> model_loader(new falcon_model_loader(fname_inp.c_str(),
+static void bonsai_model_update_internal(const std::string & fname_inp, const std::string & fname_out) {
+    std::unique_ptr<bonsai_model_loader> model_loader(new bonsai_model_loader(fname_inp.c_str(),
                                                             /*use_mmap*/ false,
                                                             /*vocab_only*/ false));
     // Simply use the ftype of the first file
@@ -2033,7 +2033,7 @@ static void falcon_model_update_internal(const std::string & fname_inp, const st
     arch_util_file_saver file_saver(fname_out.c_str(), model_loader->file_loaders.at(0).get(), ftype);
 
     size_t idx = 0;
-    for (falcon_load_tensor & tensor : model_loader->tensors_map.tensors) {
+    for (bonsai_load_tensor & tensor : model_loader->tensors_map.tensors) {
         arch_util_buffer read_data;
         read_data.resize(tensor.size);
         tensor.data = read_data.addr;
@@ -2041,18 +2041,18 @@ static void falcon_model_update_internal(const std::string & fname_inp, const st
 
         printf("[%4zu/%4zu] %36s - %16s, type = %6s, ",
                ++idx, model_loader->tensors_map.tensors.size(),
-               tensor.name.c_str(), falcon_format_tensor_shape(tensor.ne).c_str(),
+               tensor.name.c_str(), bonsai_format_tensor_shape(tensor.ne).c_str(),
                ggml_type_name(tensor.type));
 
         file_saver.write_tensor(tensor, tensor.type, tensor.data, tensor.size);
     }
 }
 
-int falcon_model_update(
+int bonsai_model_update(
         const char * fname_inp,
         const char * fname_out) {
     try {
-        falcon_model_update_internal(fname_inp, fname_out);
+        bonsai_model_update_internal(fname_inp, fname_out);
         return 0;
     } catch (const std::string & err) {
         fprintf(stderr, "%s: failed to copy: %s\n", __func__, err.c_str());
@@ -2064,14 +2064,14 @@ int falcon_model_update(
 // quantization
 //
 
-static void falcon_model_quantize_internal(const std::string & fname_inp, const std::string & fname_out, enum falcon_ftype ftype, int nthread) {
+static void bonsai_model_quantize_internal(const std::string & fname_inp, const std::string & fname_out, enum bonsai_ftype ftype, int nthread) {
     ggml_type quantized_type;
     switch (ftype) {
-        case FALCON_FTYPE_MOSTLY_Q4_0: quantized_type = GGML_TYPE_Q4_0; break;
-        case FALCON_FTYPE_MOSTLY_Q4_1: quantized_type = GGML_TYPE_Q4_1; break;
-        case FALCON_FTYPE_MOSTLY_Q5_0: quantized_type = GGML_TYPE_Q5_0; break;
-        case FALCON_FTYPE_MOSTLY_Q5_1: quantized_type = GGML_TYPE_Q5_1; break;
-        case FALCON_FTYPE_MOSTLY_Q8_0: quantized_type = GGML_TYPE_Q8_0; break;
+        case BONSAI_FTYPE_MOSTLY_Q4_0: quantized_type = GGML_TYPE_Q4_0; break;
+        case BONSAI_FTYPE_MOSTLY_Q4_1: quantized_type = GGML_TYPE_Q4_1; break;
+        case BONSAI_FTYPE_MOSTLY_Q5_0: quantized_type = GGML_TYPE_Q5_0; break;
+        case BONSAI_FTYPE_MOSTLY_Q5_1: quantized_type = GGML_TYPE_Q5_1; break;
+        case BONSAI_FTYPE_MOSTLY_Q8_0: quantized_type = GGML_TYPE_Q8_0; break;
         default: throw format("invalid output file type %d\n", ftype);
     };
 
@@ -2079,7 +2079,7 @@ static void falcon_model_quantize_internal(const std::string & fname_inp, const 
         nthread = std::thread::hardware_concurrency();
     }
 
-    std::unique_ptr<falcon_model_loader> model_loader(new falcon_model_loader(fname_inp.c_str(), /*use_mmap*/ false,
+    std::unique_ptr<bonsai_model_loader> model_loader(new bonsai_model_loader(fname_inp.c_str(), /*use_mmap*/ false,
                                                                             /*vocab_only*/ false));
     arch_util_file_saver file_saver(fname_out.c_str(), model_loader->file_loaders.at(0).get(), ftype);
 
@@ -2091,7 +2091,7 @@ static void falcon_model_quantize_internal(const std::string & fname_inp, const 
     std::mutex mutex;
 
     size_t idx = 0;
-    for (falcon_load_tensor & tensor : model_loader->tensors_map.tensors) {
+    for (bonsai_load_tensor & tensor : model_loader->tensors_map.tensors) {
         arch_util_buffer read_data;
         read_data.resize(tensor.size);
         tensor.data = read_data.addr;
@@ -2099,7 +2099,7 @@ static void falcon_model_quantize_internal(const std::string & fname_inp, const 
 
         printf("[%4zu/%4zu] %36s - %16s, type = %6s, ",
                ++idx, model_loader->tensors_map.tensors.size(),
-               tensor.name.c_str(), falcon_format_tensor_shape(tensor.ne).c_str(),
+               tensor.name.c_str(), bonsai_format_tensor_shape(tensor.ne).c_str(),
                ggml_type_name(tensor.type));
 
         // This used to be a regex, but <regex> has an extreme cost to compile times.
@@ -2217,12 +2217,12 @@ static void falcon_model_quantize_internal(const std::string & fname_inp, const 
 // interface implementation
 //
 
-struct falcon_context * falcon_init_from_file(
+struct bonsai_context * bonsai_init_from_file(
                              const char * path_model,
-            struct falcon_context_params   params) {
+            struct bonsai_context_params   params) {
     ggml_time_init();
 
-    falcon_context * ctx = new falcon_context;
+    bonsai_context * ctx = new bonsai_context;
 
     if (params.seed <= 0) {
         params.seed = time(NULL);
@@ -2250,11 +2250,11 @@ struct falcon_context * falcon_init_from_file(
 
     ggml_type memory_type = params.f16_kv ? GGML_TYPE_F16 : GGML_TYPE_F32;
 
-    if (!falcon_model_load(path_model, *ctx, params.n_ctx, memory_type,
+    if (!bonsai_model_load(path_model, *ctx, params.n_ctx, memory_type,
                           params.use_mmap, params.use_mlock, params.vocab_only,
                           params.progress_callback, params.progress_callback_user_data)) {
         fprintf(stderr, "%s: failed to load model\n", __func__);
-        falcon_free(ctx);
+        bonsai_free(ctx);
         return nullptr;
     }
 
@@ -2262,7 +2262,7 @@ struct falcon_context * falcon_init_from_file(
     if (!params.vocab_only) {
         if (!kv_cache_init(ctx->model.hparams, ctx->model.kv_self, memory_type, ctx->model.hparams.n_ctx)) {
             fprintf(stderr, "%s: kv_cache_init() failed for self-attention cache\n", __func__);
-            falcon_free(ctx);
+            bonsai_free(ctx);
             return nullptr;
         }
 
@@ -2293,17 +2293,17 @@ struct falcon_context * falcon_init_from_file(
     return ctx;
 }
 
-void falcon_free(struct falcon_context * ctx) {
+void bonsai_free(struct bonsai_context * ctx) {
     delete ctx;
 }
 
-int falcon_model_quantize(
+int bonsai_model_quantize(
         const char * fname_inp,
         const char * fname_out,
-  enum falcon_ftype   ftype,
+  enum bonsai_ftype   ftype,
         int          nthread) {
     try {
-        falcon_model_quantize_internal(fname_inp, fname_out, ftype, nthread);
+        bonsai_model_quantize_internal(fname_inp, fname_out, ftype, nthread);
         return 0;
     } catch (const std::string & err) {
         fprintf(stderr, "%s: failed to quantize: %s\n", __func__, err.c_str());
@@ -2311,7 +2311,7 @@ int falcon_model_quantize(
     }
 }
 
-int falcon_apply_lora_from_file_internal(struct falcon_context * ctx, const char * path_lora, const char * path_base_model, int n_threads) {
+int bonsai_apply_lora_from_file_internal(struct bonsai_context * ctx, const char * path_lora, const char * path_base_model, int n_threads) {
     fprintf(stderr, "%s: applying lora adapter from '%s' - please wait ...\n", __func__, path_lora);
 
     auto & model = ctx->model;
@@ -2369,12 +2369,12 @@ int falcon_apply_lora_from_file_internal(struct falcon_context * ctx, const char
 
 
     // load base model
-    std::unique_ptr<falcon_model_loader> model_loader;
+    std::unique_ptr<bonsai_model_loader> model_loader;
     ggml_context * base_ctx = NULL;
     arch_util_buffer base_buf;
     if (path_base_model) {
         fprintf(stderr, "%s: loading base model from '%s'\n", __func__, path_base_model);
-        model_loader.reset(new falcon_model_loader(path_base_model, /*use_mmap*/ true, /*vocab_only*/ false));
+        model_loader.reset(new bonsai_model_loader(path_base_model, /*use_mmap*/ true, /*vocab_only*/ false));
 
         size_t ctx_size, mmapped_size;
         model_loader->calc_sizes(&ctx_size, &mmapped_size);
@@ -2389,7 +2389,7 @@ int falcon_apply_lora_from_file_internal(struct falcon_context * ctx, const char
 
         model_loader->ggml_ctx = base_ctx;
 
-        // maybe this should in falcon_model_loader
+        // maybe this should in bonsai_model_loader
         if (model_loader->use_mmap) {
             model_loader->mapping.reset(new arch_util_mmap(&model_loader->file_loaders.at(0)->file, /* prefetch */ false));
         }
@@ -2479,7 +2479,7 @@ int falcon_apply_lora_from_file_internal(struct falcon_context * ctx, const char
                     return 1;
                 }
                 size_t idx = model_loader->tensors_map.name_to_idx[base_name];
-                falcon_load_tensor & lt = model_loader->tensors_map.tensors[idx];
+                bonsai_load_tensor & lt = model_loader->tensors_map.tensors[idx];
                 base_t = model_loader->get_tensor(base_name, { (uint32_t)dest_t->ne[0], (uint32_t)dest_t->ne[1] });
                 lt.data = (uint8_t *) lt.ggml_tensor->data;
                 model_loader->load_data_for(lt);
@@ -2550,21 +2550,21 @@ int falcon_apply_lora_from_file_internal(struct falcon_context * ctx, const char
     return 0;
 }
 
-int falcon_apply_lora_from_file(struct falcon_context * ctx, const char * path_lora, const char * path_base_model, int n_threads) {
+int bonsai_apply_lora_from_file(struct bonsai_context * ctx, const char * path_lora, const char * path_base_model, int n_threads) {
     try {
-        return falcon_apply_lora_from_file_internal(ctx, path_lora, path_base_model, n_threads);
+        return bonsai_apply_lora_from_file_internal(ctx, path_lora, path_base_model, n_threads);
     } catch (const std::string & err) {
         fprintf(stderr, "%s: failed to apply lora adapter: %s\n", __func__, err.c_str());
         return 1;
     }
 }
 
-int falcon_get_kv_cache_token_count(struct falcon_context * ctx) {
+int bonsai_get_kv_cache_token_count(struct bonsai_context * ctx) {
     return ctx->model.kv_self.n;
 }
 
 // Assumes contiguous data
-void falcon_shift_kv_cache(struct falcon_context * ctx, int n) {
+void bonsai_shift_kv_cache(struct bonsai_context * ctx, int n) {
     auto & model = ctx->model;
     auto & kv_self = model.kv_self;
     auto & hparams = model.hparams;
@@ -2592,9 +2592,9 @@ void falcon_shift_kv_cache(struct falcon_context * ctx, int n) {
     }
 }
 
-#define FALCON_MAX_RNG_STATE 64*1024
+#define BONSAI_MAX_RNG_STATE 64*1024
 
-void falcon_set_rng_seed(struct falcon_context * ctx, int seed) {
+void bonsai_set_rng_seed(struct bonsai_context * ctx, int seed) {
     if (seed <= 0) {
         seed = time(NULL);
     }
@@ -2602,11 +2602,11 @@ void falcon_set_rng_seed(struct falcon_context * ctx, int seed) {
 }
 
 // Returns the size of the state
-size_t falcon_get_state_size(struct falcon_context * ctx) {
+size_t bonsai_get_state_size(struct bonsai_context * ctx) {
     // we don't know size of rng until we actually serialize it. so reserve more than enough memory for its serialized state.
     // for reference, std::mt19937(1337) serializes to 6701 bytes.
     const size_t s_rng_size        = sizeof(size_t);
-    const size_t s_rng             = FALCON_MAX_RNG_STATE;
+    const size_t s_rng             = BONSAI_MAX_RNG_STATE;
     const size_t s_logits_capacity = sizeof(size_t);
     const size_t s_logits_size     = sizeof(size_t);
     const size_t s_logits          = ctx->logits.capacity() * sizeof(float);
@@ -2633,7 +2633,7 @@ size_t falcon_get_state_size(struct falcon_context * ctx) {
 }
 
 // Copies the state to the specified destination address
-size_t falcon_copy_state_data(struct falcon_context * ctx, uint8_t * dest) {
+size_t bonsai_copy_state_data(struct bonsai_context * ctx, uint8_t * dest) {
     uint8_t * out = dest;
 
     // copy rng
@@ -2642,13 +2642,13 @@ size_t falcon_copy_state_data(struct falcon_context * ctx, uint8_t * dest) {
         rng_ss << ctx->rng;
 
         const size_t rng_size = rng_ss.str().size();
-        char rng_buf[FALCON_MAX_RNG_STATE];
+        char rng_buf[BONSAI_MAX_RNG_STATE];
 
-        memset(&rng_buf[0], 0, FALCON_MAX_RNG_STATE);
+        memset(&rng_buf[0], 0, BONSAI_MAX_RNG_STATE);
         memcpy(&rng_buf[0], rng_ss.str().data(), rng_ss.str().size());
 
         memcpy(out, &rng_size,   sizeof(rng_size));    out += sizeof(rng_size);
-        memcpy(out, &rng_buf[0], FALCON_MAX_RNG_STATE); out += FALCON_MAX_RNG_STATE;
+        memcpy(out, &rng_buf[0], BONSAI_MAX_RNG_STATE); out += BONSAI_MAX_RNG_STATE;
     }
 
     // copy logits
@@ -2681,7 +2681,7 @@ size_t falcon_copy_state_data(struct falcon_context * ctx, uint8_t * dest) {
     // copy kv cache
     {
         const size_t kv_size = ctx->model.kv_self.buf.size;
-        const int    kv_ntok = falcon_get_kv_cache_token_count(ctx);
+        const int    kv_ntok = bonsai_get_kv_cache_token_count(ctx);
 
         memcpy(out, &kv_size, sizeof(kv_size)); out += sizeof(kv_size);
         memcpy(out, &kv_ntok, sizeof(kv_ntok)); out += sizeof(kv_ntok);
@@ -2692,7 +2692,7 @@ size_t falcon_copy_state_data(struct falcon_context * ctx, uint8_t * dest) {
     }
 
     const size_t written  = out - dest;
-    const size_t expected = falcon_get_state_size(ctx);
+    const size_t expected = bonsai_get_state_size(ctx);
 
     ARCH_ASSERT(written == expected);
 
@@ -2700,16 +2700,16 @@ size_t falcon_copy_state_data(struct falcon_context * ctx, uint8_t * dest) {
 }
 
 // Sets the state reading from the specified source address
-size_t falcon_set_state_data(struct falcon_context * ctx, const uint8_t * src) {
+size_t bonsai_set_state_data(struct bonsai_context * ctx, const uint8_t * src) {
     const uint8_t * in = src;
 
     // set rng
     {
         size_t rng_size;
-        char   rng_buf[FALCON_MAX_RNG_STATE];
+        char   rng_buf[BONSAI_MAX_RNG_STATE];
 
         memcpy(&rng_size,   in, sizeof(rng_size));    in += sizeof(rng_size);
-        memcpy(&rng_buf[0], in, FALCON_MAX_RNG_STATE); in += FALCON_MAX_RNG_STATE;
+        memcpy(&rng_buf[0], in, BONSAI_MAX_RNG_STATE); in += BONSAI_MAX_RNG_STATE;
 
         std::stringstream rng_ss;
         rng_ss.str(std::string(&rng_buf[0], rng_size));
@@ -2775,20 +2775,20 @@ size_t falcon_set_state_data(struct falcon_context * ctx, const uint8_t * src) {
     }
 
     const size_t nread    = in - src;
-    const size_t expected = falcon_get_state_size(ctx);
+    const size_t expected = bonsai_get_state_size(ctx);
 
     ARCH_ASSERT(nread == expected);
 
     return nread;
 }
 
-int falcon_eval(
-        struct falcon_context * ctx,
-           const falcon_token * tokens,
+int bonsai_eval(
+        struct bonsai_context * ctx,
+           const bonsai_token * tokens,
                          int   n_tokens,
                          int   n_past,
                          int   n_threads) {
-    if (!falcon_eval_internal(*ctx, tokens, n_tokens, n_past, n_threads)) {
+    if (!bonsai_eval_internal(*ctx, tokens, n_tokens, n_past, n_threads)) {
         fprintf(stderr, "%s: failed to eval\n", __func__);
         return 1;
     }
@@ -2800,13 +2800,13 @@ int falcon_eval(
     return 0;
 }
 
-int falcon_tokenize(
-        struct falcon_context * ctx,
+int bonsai_tokenize(
+        struct bonsai_context * ctx,
                   const char * text,
-                 falcon_token * tokens,
+                 bonsai_token * tokens,
                          int   n_max_tokens,
                         bool   add_bos) {
-    auto res = falcon_tokenize(ctx->vocab, text, add_bos);
+    auto res = bonsai_tokenize(ctx->vocab, text, add_bos);
 
     if (n_max_tokens < (int) res.size()) {
         fprintf(stderr, "%s: too many tokens\n", __func__);
@@ -2820,49 +2820,49 @@ int falcon_tokenize(
     return res.size();
 }
 
-int falcon_n_vocab(struct falcon_context * ctx) {
+int bonsai_n_vocab(struct bonsai_context * ctx) {
     return ctx->vocab.id_to_token.size();
 }
 
-int falcon_n_ctx(struct falcon_context * ctx) {
+int bonsai_n_ctx(struct bonsai_context * ctx) {
     return ctx->model.hparams.n_ctx;
 }
 
-int falcon_n_embd(struct falcon_context * ctx) {
+int bonsai_n_embd(struct bonsai_context * ctx) {
     return ctx->model.hparams.n_embd;
 }
 
-float * falcon_get_logits(struct falcon_context * ctx) {
+float * bonsai_get_logits(struct bonsai_context * ctx) {
     //return (float *)(ctx->model.state.logits->data);
     return ctx->logits.data();
 }
 
-float * falcon_get_embeddings(struct falcon_context * ctx) {
+float * bonsai_get_embeddings(struct bonsai_context * ctx) {
     return ctx->embedding.data();
 }
 
-const char * falcon_token_to_str(struct falcon_context * ctx, falcon_token token) {
-    if (token >= falcon_n_vocab(ctx)) {
+const char * bonsai_token_to_str(struct bonsai_context * ctx, bonsai_token token) {
+    if (token >= bonsai_n_vocab(ctx)) {
         return nullptr;
     }
 
     return ctx->vocab.id_to_token[token].tok.c_str();
 }
 
-falcon_token falcon_str_to_token(struct falcon_context * ctx, const char * str) {
+bonsai_token bonsai_str_to_token(struct bonsai_context * ctx, const char * str) {
     return ctx->vocab.token_to_id[str];
 }
 
-falcon_token falcon_token_bos() {
+bonsai_token bonsai_token_bos() {
     return 11;
 }
 
-falcon_token falcon_token_eos() {
+bonsai_token bonsai_token_eos() {
     return 11;
 }
 
 
-void falcon_print_timings(struct falcon_context * ctx) {
+void bonsai_print_timings(struct bonsai_context * ctx) {
     const int64_t t_end_us = ggml_time_us();
 
     const int32_t n_sample = std::max(1, ctx->n_sample);
@@ -2877,14 +2877,14 @@ void falcon_print_timings(struct falcon_context * ctx) {
     fprintf(stderr, "%s:       total time = %8.2f ms\n", __func__, (t_end_us - ctx->t_start_us)/1000.0);
 }
 
-void falcon_reset_timings(struct falcon_context * ctx) {
+void bonsai_reset_timings(struct bonsai_context * ctx) {
     ctx->t_start_us = ggml_time_us();
     ctx->t_sample_us = ctx->n_sample = 0;
     ctx->t_eval_us   = ctx->n_eval   = 0;
     ctx->t_p_eval_us = ctx->n_p_eval = 0;
 }
 
-const char * falcon_print_system_info(void) {
+const char * bonsai_print_system_info(void) {
     static std::string s;
 
     s  = "";
@@ -2907,11 +2907,11 @@ const char * falcon_print_system_info(void) {
 }
 
 // For internal test use
-std::vector<std::pair<std::string, struct ggml_tensor *>>& falcon_internal_get_tensor_map(struct falcon_context * ctx) {
+std::vector<std::pair<std::string, struct ggml_tensor *>>& bonsai_internal_get_tensor_map(struct bonsai_context * ctx) {
     return ctx->model.tensors_by_name;
 }
 
-size_t falcon_load_session_file(struct falcon_context * ctx, const char * path_session, falcon_token * tokens_out, size_t n_token_capacity, size_t * n_token_count_out) {
+size_t bonsai_load_session_file(struct bonsai_context * ctx, const char * path_session, bonsai_token * tokens_out, size_t n_token_capacity, size_t * n_token_count_out) {
     // TODO leverage mmap
     arch_util_file file(path_session, "rb");
     const uint32_t magic = file.read_u32();
@@ -2922,8 +2922,8 @@ size_t falcon_load_session_file(struct falcon_context * ctx, const char * path_s
         return 0;
     }
 
-    falcon_hparams session_hparams;
-    file.read_raw(&session_hparams, sizeof(falcon_hparams));
+    bonsai_hparams session_hparams;
+    file.read_raw(&session_hparams, sizeof(bonsai_hparams));
 
     // REVIEW
     if (session_hparams != ctx->model.hparams) {
@@ -2933,33 +2933,33 @@ size_t falcon_load_session_file(struct falcon_context * ctx, const char * path_s
 
     const uint32_t n_token_count = file.read_u32();
     ARCH_ASSERT(n_token_capacity >= n_token_count);
-    file.read_raw(tokens_out, sizeof(falcon_token) * n_token_count);
+    file.read_raw(tokens_out, sizeof(bonsai_token) * n_token_count);
     *n_token_count_out = n_token_count;
 
     const size_t n_state_size = file.size - file.tell();
-    const size_t n_orig_state_size = falcon_get_state_size(ctx);
+    const size_t n_orig_state_size = bonsai_get_state_size(ctx);
     if (n_state_size != n_orig_state_size) {
         fprintf(stderr, "%s : failed to validate state size\n", __func__);
     }
     std::unique_ptr<uint8_t[]> state_data(new uint8_t[n_state_size]);
     file.read_raw(state_data.get(), n_state_size);
-    return falcon_set_state_data(ctx, state_data.get());
+    return bonsai_set_state_data(ctx, state_data.get());
 }
 
-size_t falcon_save_session_file(struct falcon_context * ctx, const char * path_session, const falcon_token * tokens, size_t n_token_count) {
+size_t bonsai_save_session_file(struct bonsai_context * ctx, const char * path_session, const bonsai_token * tokens, size_t n_token_count) {
     // TODO save temp & swap
     arch_util_file file(path_session, "wb");
 
-    const size_t n_state_size = falcon_get_state_size(ctx);
+    const size_t n_state_size = bonsai_get_state_size(ctx);
     std::unique_ptr<uint8_t[]> state_data(new uint8_t[n_state_size]);
-    falcon_copy_state_data(ctx, state_data.get());
+    bonsai_copy_state_data(ctx, state_data.get());
 
     file.write_u32('ggsn'); // magic
     file.write_u32(0); // version
-    file.write_raw(&ctx->model.hparams, sizeof(falcon_hparams));
+    file.write_raw(&ctx->model.hparams, sizeof(bonsai_hparams));
 
     file.write_u32((uint32_t) n_token_count); // REVIEW
-    file.write_raw(tokens, sizeof(falcon_token) * n_token_count);
+    file.write_raw(tokens, sizeof(bonsai_token) * n_token_count);
 
     file.write_raw(state_data.get(), n_state_size);
     return n_state_size; // REVIEW
