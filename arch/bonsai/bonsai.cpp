@@ -32,12 +32,9 @@
 #define BONSAI_USE_SCRATCH
 #define BONSAI_MAX_SCRATCH_BUFFERS 16
 
-// available open-assistant based bonsai models
-// OpenAssistant/stablelm-7b-sft-v7-epoch-3
-// OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5
 enum e_model {
     MODEL_UNKNOWN,
-    MODEL_3B, // StabilityAI Base Alpha 3B
+    MODEL_1B,
     MODEL_7B,
     MODEL_12B,
     MODEL_20B,
@@ -55,7 +52,7 @@ static const size_t MiB = 1024*1024;
 static const std::map<e_model, size_t> & MEM_REQ_SCRATCH0()
 {
     static std::map<e_model, size_t> _MEM_REQ_SCRATCH0 = {
-        { MODEL_3B,    256ull * MiB },
+        { MODEL_1B,    256ull * MiB },
         { MODEL_7B,    512ull * MiB },
         { MODEL_12B,   512ull * MiB },
         { MODEL_20B,   512ull * MiB },
@@ -67,7 +64,7 @@ static const std::map<e_model, size_t> & MEM_REQ_SCRATCH0()
 static const std::map<e_model, size_t> & MEM_REQ_SCRATCH1()
 {
     static std::map<e_model, size_t> _MEM_REQ_SCRATCH1 = {
-        { MODEL_3B,    256ull * MiB },
+        { MODEL_1B,    256ull * MiB },
         { MODEL_7B,    512ull * MiB },
         { MODEL_12B,   512ull * MiB },
         { MODEL_20B,   512ull * MiB },
@@ -81,7 +78,7 @@ static const std::map<e_model, size_t> & MEM_REQ_SCRATCH1()
 static const std::map<e_model, size_t> & MEM_REQ_KV_SELF()
 {
     static std::map<e_model, size_t> _MEM_REQ_KV_SELF = {
-        { MODEL_3B,   512ull * MiB },
+        { MODEL_1B,   512ull * MiB },
         { MODEL_7B,   1026ull * MiB },
         { MODEL_12B,  1608ull * MiB },
         { MODEL_20B,  1608ull * MiB },
@@ -95,7 +92,7 @@ static const std::map<e_model, size_t> & MEM_REQ_KV_SELF()
 static const std::map<e_model, size_t> & MEM_REQ_EVAL()
 {
     static std::map<e_model, size_t> _MEM_REQ_EVAL = {
-        { MODEL_3B,   512ull * MiB },
+        { MODEL_1B,   512ull * MiB },
         { MODEL_7B,  1608ull * MiB },
         { MODEL_12B, 1024ull * MiB },
         { MODEL_20B, 1024ull * MiB },
@@ -873,7 +870,7 @@ static const char *bonsai_ftype_name(enum bonsai_ftype ftype) {
 
 static const char *bonsai_model_type_name(e_model type) {
     switch (type) {
-        case MODEL_3B: return "3B";
+        case MODEL_1B: return "1B";
         case MODEL_7B: return "7B";
         case MODEL_12B: return "12B";
         case MODEL_20B: return "20B";
@@ -905,14 +902,8 @@ static void bonsai_model_load_internal(
     
     {
         switch (hparams.n_layer) {
-            case 32: {
-                if (hparams.n_embd < 4544) {
-                    model.type = e_model::MODEL_3B;
-                } else {
-                    model.type = e_model::MODEL_7B;
-                }
-                break;
-            }
+            case 24: model.type = e_model::MODEL_1B; break;
+            case 32: model.type = e_model::MODEL_7B; break;
             case 36: model.type = e_model::MODEL_12B; break;
             case 44: model.type = e_model::MODEL_20B; break;
         }
@@ -1103,10 +1094,62 @@ static void bonsai_model_set_param(bonsai_context & lctx) {
 
 // Helpers
 
-static inline struct ggml_tensor * layer_norm(ggml_context * ctx, struct ggml_tensor * x, struct ggml_tensor * weight, struct ggml_tensor * bias) {
-    // LayerNorm in bonsai is `x = (x - mean(x)) / sqrt(variance(x) + 1e-5) * weight + bias`
-    // Looks like ggml_norm does the first part, we only need to apply weight & bias.
-    struct ggml_tensor * cur = ggml_norm(ctx, x);
+/*def grelu(x):
+    x_zeros = torch.zeros_like(x)
+    relu_part = torch.max(x, x_zeros)
+    x1 = torch.neg(torch.max(torch.neg(x), x_zeros))
+    two_over_pi = math.sqrt(2 / math.pi)
+    tanh_part = torch.tanh(torch.mul(x1, two_over_pi))
+    gelu_part = torch.mul(x1, (torch.add(x1, tanh_part)))
+    return torch.add(relu_part, gelu_part)*/
+void ggml_ext_grelu_inplace_impl(const int n_cols, float * dest, const float * src) {
+    for (int i = 0; i < n_cols; i++) {
+        float x = src[i];
+        float relu_part = fmaxf(x, 0);
+        float x1 = -(fmaxf(-x, 0));
+        float two_over_pi = sqrtf(2.0f / M_PI);
+        float tanh_part = tanhf(x1 * two_over_pi);
+        float gelu_part = x1 * (tanh_part + 1.0f);
+        dest[i] = relu_part + gelu_part;
+    }
+}
+
+struct ggml_tensor * ggml_ext_grelu_inplace(ggml_context * ctx, struct ggml_tensor * x) {
+    return ggml_map_unary_inplace_f32(ctx, x, ggml_ext_grelu_inplace_impl);
+}
+
+void ggml_ext_sub_minval_impl(const int n_cols, float * dest, const float * src) {
+    float minval = src[0];
+    for (int i = 1; i < n_cols; i++) minval = fminf(minval, src[i]);
+    for (int i = 0; i < n_cols; i++) dest[i] = src[i] - minval;
+}
+
+struct ggml_tensor * ggml_ext_sub_minval(ggml_context * ctx, struct ggml_tensor * x) {
+    return ggml_map_unary_f32(ctx, x, ggml_ext_sub_minval_impl);
+}
+
+void ggml_ext_rsqrt_inplace_impl(const int n_cols, float * dest, const float * src) {
+    for (int i = 0; i < n_cols; i++) dest[i] = 1.0f / sqrtf(src[i]);
+}
+
+struct ggml_tensor * ggml_ext_rsqrt_inplace(ggml_context * ctx, struct ggml_tensor * x) {
+    return ggml_map_unary_f32(ctx, x, ggml_ext_rsqrt_inplace_impl);
+}
+
+static inline struct ggml_tensor * bonsai_rms_norm(ggml_context * ctx, struct ggml_tensor * x, struct ggml_tensor * weight, struct ggml_tensor * bias) { //, float epsilon) {
+    // BonsaiRMSNorm is equivalent to T5LayerNorm with shift to positive
+    //struct ggml_tensor * cur = ggml_rms_norm(ctx, x);
+    float epsilon = 1e-5;
+    struct ggml_tensor * eps = ggml_new_f32(ctx, epsilon);
+    // variance = mean(x^2)
+    struct ggml_tensor * variance = ggml_mean(ctx, ggml_sqr(ctx, x)); // new tensor
+    // rms_norm = x * ( 1.0 / sqrt(var + eps) )
+    struct ggml_tensor * cur = ggml_ext_rsqrt_inplace(ctx, ggml_add1_inplace(ctx, variance, eps));
+    cur = ggml_repeat(ctx, cur, x);
+    cur = ggml_mul_inplace(ctx, cur, x);
+    // Shift to positive
+    cur = ggml_add1_inplace(ctx, ggml_ext_sub_minval(ctx, cur), eps);
+    // Weights and bias
     return ggml_add_inplace(ctx,
             ggml_mul_inplace(ctx,
                 cur,
@@ -1179,7 +1222,8 @@ static bool bonsai_eval_internal(
         lctx.use_buf(ctx, 0);
 
         // input norm
-        struct ggml_tensor * cur = layer_norm(ctx, inpL, layer.ln_pre_g, layer.ln_pre_b);
+        struct ggml_tensor * cur = bonsai_rms_norm(ctx, inpL, layer.ln_pre_g, layer.ln_pre_b);
+        struct ggml_tensor * inpL = cur; // Residual must be post-norm in this arch
         struct ggml_tensor * outLN = cur;
 
         // self-attention
@@ -1340,10 +1384,9 @@ static bool bonsai_eval_internal(
                 // MLP FC (expand)
                 cur = ggml_mul_mat(ctx, layer.mlp_fc_w, outLN);
                     //cur = ggml_add(ctx0, ggml_repeat(ctx0, model.layers[il].mlp_fc_b, cur), cur);
-                // GELU activation
-                cur = ggml_gelu_inplace(ctx, cur);
-                // RELU activation - for testing
-                //cur = ggml_relu_inplace(ctx, cur);
+                // GRELU activation
+                cur = ggml_ext_grelu_inplace(ctx, cur);
+                //cur = ggml_gelu_inplace(ctx, cur);
                 // MLP Proj (contract)
                 cur = ggml_mul_mat(ctx, layer.mlp_proj_w, cur);
                     //cur = ggml_add(ctx0, ggml_repeat(ctx0, model.layers[il].mlp_proj_b, cur), cur);
@@ -1359,7 +1402,7 @@ static bool bonsai_eval_internal(
             struct ggml_tensor * outAttn = cur;
             inpL = ggml_add_inplace(ctx, outAttn, inpL);
             // Only post attn ln if not parallel attn
-            outLN = layer_norm(ctx, inpL, layer.ln_post_g, layer.ln_post_b);
+            outLN = bonsai_rms_norm(ctx, inpL, layer.ln_post_g, layer.ln_post_b);
             // feed-forward network
             {
                 // MLP FC (expand)
@@ -1388,7 +1431,7 @@ static bool bonsai_eval_internal(
 
     // norm
     // inpL = ln_f_g*inpL + ln_f_b
-    inpL = layer_norm(ctx, inpL, model.ln_f_g, model.ln_f_b);
+    inpL = bonsai_rms_norm(ctx, inpL, model.ln_f_g, model.ln_f_b);
     embeddings = inpL;
 
     // lm_head
